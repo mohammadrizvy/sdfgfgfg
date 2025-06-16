@@ -5,7 +5,7 @@ import logging
 import asyncio
 from typing import Optional
 from datetime import datetime, timezone
-
+from utils.transcript_manager import TranscriptManager
 # Import utils
 from utils import storage
 from utils.views import TicketControlsView
@@ -189,7 +189,7 @@ class TicketCommands(commands.Cog):
             embed.set_thumbnail(url='https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo')
 
             # Set up controls with claim button
-            controls = TicketControlsView(self.bot, ticket_number)
+            controls = TicketControlsView(self.bot, ticket_number, initialize_from_db=False)
             control_message = await ticket_channel.send(
                 embed=embed,
                 view=controls
@@ -299,7 +299,7 @@ class TicketCommands(commands.Cog):
     @app_commands.command(name="close_ticket")
     @app_commands.describe(reason="Reason for closing the ticket")
     async def close_ticket_command(self, interaction: discord.Interaction, reason: str = "Completed"):
-        """Close a ticket (Staff only)"""
+        """Close a ticket (Staff only) with enhanced transcript generation"""
         try:
             # Check if user has staff permissions
             if not any(role.name in ["Staff", "Admin", "Moderator", "Carrier"] for role in interaction.user.roles):
@@ -362,126 +362,279 @@ class TicketCommands(commands.Cog):
                 # Close the ticket
                 await storage.close_ticket(ticket_number, reason)
                 
-                # Send closing message
+                # Send closing message with transcript generation info
                 await interaction.channel.send(
                     embed=discord.Embed(
                         title="🔒 Ticket Closing",
-                        description=f"This ticket will be deleted in 10 seconds...\n\n**Close Reason:** {reason}\n**Closed by:** {interaction.user.mention}",
+                        description=(
+                            f"This ticket will be deleted in 15 seconds...\n\n"
+                            f"**Close Reason:** {reason}\n"
+                            f"**Closed by:** {interaction.user.mention}\n\n"
+                            f"📋 **Generating enhanced transcript...** Please wait..."
+                        ),
                         color=discord.Color.blue()
                     )
                 )
                 
+                # Get all messages from the ticket channel
+                messages = []
+                async for msg in interaction.channel.history(limit=None, oldest_first=True):
+                    messages.append(msg)
+                
+                # Initialize transcript manager
+                transcript_manager = TranscriptManager(self.bot)
+                
+                # Generate comprehensive transcript (both HTML and text)
+                transcript_results = await transcript_manager.generate_comprehensive_transcript(
+                    ticket_number, messages, ticket_data
+                )
+                
+                # Get the ticket creator
+                creator_id = ticket_data.get('creator_id')
+                creator = None
+                if creator_id:
+                    try:
+                        creator = await interaction.guild.fetch_member(int(creator_id))
+                    except:
+                        logger.warning(f"Could not fetch creator {creator_id} for ticket {ticket_number}")
+
+                # Create enhanced transcript embed with Discord-like styling
+                transcript_embed = discord.Embed(
+                    title="📋 Enhanced Ticket Transcript",
+                    description=f"**Ticket #{ticket_number}** has been closed and archived with full transcript",
+                    color=discord.Color.from_rgb(88, 101, 242)  # Discord blurple
+                )
+                
+                # Add ticket information
+                transcript_embed.add_field(
+                    name="🎫 Ticket Details",
+                    value=(
+                        f"**Category:** {ticket_data.get('category', 'Unknown')}\n"
+                        f"**Creator:** {creator.mention if creator else (f'<@{creator_id}>' if creator_id else 'Unknown')}\n"
+                        f"**Claimed By:** {ticket_data.get('claimed_by', 'Unclaimed')}\n"
+                        f"**Closed By:** {interaction.user.mention}\n"
+                        f"**Close Reason:** {reason}"
+                    ),
+                    inline=True
+                )
+                
+                # Add statistics
+                participants = set(str(msg.author.id) for msg in messages if not msg.author.bot)
+                staff_messages = sum(1 for msg in messages if any(role.name in ["Staff", "Admin", "Moderator", "Carrier"] for role in msg.author.roles))
+                
+                transcript_embed.add_field(
+                    name="📊 Conversation Stats",
+                    value=(
+                        f"**Total Messages:** {len(messages)}\n"
+                        f"**Staff Messages:** {staff_messages}\n"
+                        f"**User Messages:** {len(messages) - staff_messages}\n"
+                        f"**Participants:** {len(participants)}"
+                    ),
+                    inline=True
+                )
+                
+                # Add timing information
+                created_time = ticket_data.get('created_at', 'Unknown')
+                if created_time != 'Unknown':
+                    try:
+                        from datetime import datetime
+                        created_dt = datetime.fromisoformat(created_time.replace('Z', '+00:00'))
+                        duration = datetime.utcnow() - created_dt.replace(tzinfo=None)
+                        duration_str = f"{duration.days}d {duration.seconds//3600}h {(duration.seconds//60)%60}m"
+                    except:
+                        duration_str = "Unknown"
+                else:
+                    duration_str = "Unknown"
+                
+                transcript_embed.add_field(
+                    name="⏰ Timing Info",
+                    value=(
+                        f"**Created:** <t:{int(created_dt.timestamp())}:R>\n"
+                        f"**Duration:** {duration_str}\n"
+                        f"**Closed:** <t:{int(datetime.utcnow().timestamp())}:f>"
+                    ),
+                    inline=False
+                )
+                
+                # Add transcript links with beautiful formatting
+                transcript_links = []
+                if transcript_results.get('html_url'):
+                    transcript_links.append(f"🌐 **[Discord-Style HTML Transcript]({transcript_results['html_url']})**")
+                    transcript_links.append("*Beautiful web interface with Discord styling*")
+                
+                if transcript_results.get('text_file'):
+                    transcript_links.append("📄 **Text Transcript** (attached below)")
+                    transcript_links.append("*Traditional format for backup*")
+                
+                if transcript_links:
+                    transcript_embed.add_field(
+                        name="🔗 Transcript Access",
+                        value="\n".join(transcript_links),
+                        inline=False
+                    )
+                
+                # Add service details if available
+                details = ticket_data.get('details', '')
+                if details and details.strip():
+                    # Clean and format details
+                    formatted_details = details.replace("**", "").replace("*", "")[:200]
+                    if len(formatted_details) == 200:
+                        formatted_details += "..."
+                    
+                    transcript_embed.add_field(
+                        name="📝 Service Details",
+                        value=f"```{formatted_details}```",
+                        inline=False
+                    )
+                
+                # Set thumbnail and footer
+                transcript_embed.set_thumbnail(url="https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo")
+                transcript_embed.set_footer(
+                    text="FakePixel Giveaways • Enhanced Transcript System • Click HTML link for best experience",
+                    icon_url="https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo"
+                )
+                
+                transcript_embed.timestamp = datetime.utcnow()
+                
+                # Prepare files to send
+                files = []
+                if transcript_results.get('text_file'):
+                    files.append(discord.File(
+                        transcript_results['text_file'],
+                        filename=f"transcript_{ticket_number}.txt"
+                    ))
+
                 # Send transcript to logs channel if it exists
                 transcript_channel = discord.utils.get(interaction.guild.channels, name="ticket-transcripts")
                 if transcript_channel:
                     try:
-                        # Get all messages from the ticket channel
-                        messages = []
-                        async for msg in interaction.channel.history(limit=None, oldest_first=True):
-                            messages.append(msg)
+                        logger.info(f"Found transcript channel: {transcript_channel.name} (ID: {transcript_channel.id})")
+                        await transcript_channel.send(embed=transcript_embed, files=files)
+                        logger.info(f"Sent transcript to logs channel for ticket {ticket_number}")
+                    except Exception as e:
+                        logger.error(f"Error sending transcript to logs channel: {e}")
+                        logger.error(f"Channel permissions: {transcript_channel.permissions_for(interaction.guild.me)}")
+                else:
+                    logger.error(f"Transcript channel not found in guild {interaction.guild.name} (ID: {interaction.guild.id})")
+                    logger.info(f"Available channels: {[c.name for c in interaction.guild.channels]}")
+
+                # Send transcript to the ticket creator
+                if creator:
+                    try:
+                        # Create a user-friendly version of the embed matching the provided image (Top Embed)
+                        user_transcript_embed = discord.Embed(
+                            title=f"Here's the Ticket {ticket_number} transcript",
+                            description=f"{creator.mention}, if you had something important in your ticket or you\n" 
+                                        "have faced with some problems while getting help from our Staff, use this\n" 
+                                        "transcript which contains of every single message which was sent there.",
+                            color=discord.Color.from_rgb(47, 49, 54) # Dark Discord-like color
+                        )
                         
-                        # Create transcript
-                        transcript_content = self.format_transcript(ticket_number, messages, ticket_data, reason, interaction.user)
-                        
-                        # Save transcript to file
-                        import os
-                        os.makedirs('transcripts', exist_ok=True)
-                        transcript_file = f"transcripts/ticket_{ticket_number}.txt"
-                        
-                        with open(transcript_file, 'w', encoding='utf-8') as f:
-                            f.write(transcript_content)
-                        
-                        # Send transcript to channel
-                        with open(transcript_file, 'rb') as f:
-                            file = discord.File(f, filename=f"ticket_{ticket_number}_transcript.txt")
-                            
-                            transcript_embed = discord.Embed(
-                                title="📋 Ticket Transcript",
-                                description=f"Transcript for ticket #{ticket_number}",
-                                color=discord.Color.blue(),
-                                timestamp=datetime.utcnow()
+                        if transcript_results.get('html_url'):
+                            # Extract just the filename (unique ID) from the HTML URL
+                            transcript_id = transcript_results['html_url'].split('/')[-1]
+                            display_url = f"https://transcription.fakepixel-giveaways/view/{transcript_id}"
+                            user_transcript_embed.add_field(
+                                name="Transcription Link",
+                                value=f"[{display_url}]({transcript_results['html_url']})", # Display the full URL as link text
+                                inline=False
                             )
-                            transcript_embed.add_field(
-                                name="Ticket Information",
+                        
+                        user_transcript_embed.add_field(
+                            name="Ticket was closed with the reason",
+                            value=reason,
+                            inline=False
+                        )
+                        
+                        user_transcript_embed.set_footer(
+                            text="Open the link to see the transcript."
+                        )
+                        
+                        await creator.send(embed=user_transcript_embed)
+                        logger.info(f"Sent transcript to creator {creator.name} for ticket {ticket_number}")
+
+                        # Send feedback request to user with transcript link (initial request)
+                        from utils.views import StarRatingView
+                        view = StarRatingView(ticket_number, int(creator_id))
+                             
+                        feedback_request_embed = discord.Embed(
+                            title="🌟 Your Feedback Matters! Rate Your Service 🌟",
+                            description=(
+                                f"Hello **{creator.display_name}**! Your ticket **#{ticket_number}** has been successfully closed.\n\n"
+                                "We hope you had an amazing experience with our support team. Your feedback helps us improve and provide even better service!\n\n"
+                                "Please take a moment to rate your overall experience below. It's quick, easy, and incredibly valuable to us!"
+                            ),
+                            color=discord.Color.from_rgb(255, 215, 0)
+                        )
+                        
+                        if transcript_results.get('html_url'):
+                            feedback_request_embed.add_field(
+                                name="📋 Your Beautiful Transcript",
                                 value=(
-                                    f"**Category:** {ticket_data.get('category', 'Unknown')}\n"
-                                    f"**Creator:** <@{ticket_data.get('creator_id', 'Unknown')}>\n"
-                                    f"**Claimed By:** {ticket_data.get('claimed_by', 'Unclaimed')}\n"
-                                    f"**Closed By:** {interaction.user.mention}\n"
-                                    f"**Close Reason:** {reason}"
+                                    f"[**🌐 View Your Discord-Style Transcript**]({transcript_results['html_url']})\n"
+                                    "*Click to see your conversation in a beautiful Discord-like interface!*"
                                 ),
                                 inline=False
                             )
-                            
-                            await transcript_channel.send(embed=transcript_embed, file=file)
+                             
+                        feedback_request_embed.add_field(
+                            name="💡 Why Your Feedback is Important",
+                            value="Your ratings and comments help us identify areas of improvement, recognize outstanding staff, and enhance our services for everyone in our community.",
+                            inline=False
+                        )
                         
-                    except Exception as transcript_error:
-                        logger.error(f"Error creating transcript: {transcript_error}")
-                
-                # Send feedback request to user
-                try:
-                    creator_id = ticket_data.get('creator_id') or ticket_data.get('user_id')
-                    if creator_id:
-                        creator = await interaction.guild.fetch_member(int(creator_id))
-                        if creator:
-                            from utils.views import StarRatingView
-                            view = StarRatingView(ticket_number, int(creator_id))
-                            
-                            feedback_embed = discord.Embed(
-                                title="🌟 Your Feedback Matters! Rate Your Service 🌟",
-                                description=(
-                                    f"Hello {creator.name}! Your ticket **#{ticket_number}** has been successfully closed.\n\n"
-                                    "We hope you had a great experience with our support team. Your feedback helps us improve and provide even better service!\n\n"
-                                    "Please take a moment to rate your overall experience below. It's quick, easy, and incredibly valuable to us!"
-                                ),
-                                color=discord.Color.from_rgb(255, 215, 0)
-                            )
-                            feedback_embed.add_field(
-                                name="💡 Why Your Feedback is Important",
-                                value="Your ratings and comments help us identify areas of improvement, recognize outstanding staff, and enhance our services for everyone.",
-                                inline=False
-                            )
-                            feedback_embed.add_field(
-                                name="✅ What Happens Next?",
-                                value="Once you submit your rating, your feedback will be reviewed by our team. Thank you for helping us grow!",
-                                inline=False
-                            )
-                            feedback_embed.set_footer(
-                                text="FakePixel Giveaways • Customer Satisfaction Survey"
-                            )
-                            feedback_embed.set_thumbnail(url='https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo')
-                            
-                            try:
-                                await creator.send(embed=feedback_embed, view=view)
-                            except discord.Forbidden:
-                                logger.warning(f"Could not send feedback request to {creator.name} - DMs closed")
-                                
-                except Exception as feedback_error:
-                    logger.error(f"Error sending feedback request: {feedback_error}")
-                
-                # Store the ticket log with all messages
-                await storage.store_ticket_log(
-                    ticket_number=ticket_number,
-                    messages=messages,
-                    creator_id=ticket_data.get('creator_id'),
-                    category=ticket_data.get('category'),
-                    claimed_by=ticket_data.get('claimed_by'),
-                    closed_by=str(interaction.user.id),
-                    details=ticket_data.get('details'),
-                    guild_id=interaction.guild.id,
-                    close_reason=reason
-                )
-                
-                # Wait before deleting
-                await asyncio.sleep(10)
+                        feedback_request_embed.add_field(
+                            name="✅ What Happens Next?",
+                            value="Once you submit your rating, your feedback will be reviewed by our management team. Thank you for helping us grow and improve!",
+                            inline=False
+                        )
+                        
+                        feedback_request_embed.set_footer(
+                            text="FakePixel Giveaways • Customer Satisfaction Survey"
+                        )
+                        feedback_request_embed.set_thumbnail(url='https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo')
+                        
+                        try:
+                            await creator.send(embed=feedback_request_embed, view=view)
+                            logger.info(f"Feedback request with transcript link sent to {creator.display_name}")
+                        except discord.Forbidden:
+                            logger.warning(f"Could not send feedback request to {creator.display_name} - DMs closed")
+
+                    except Exception as e:
+                        logger.error(f"Error sending transcript or feedback request to creator: {e}")
+                        # Fallback for transcript link only
+                        try:
+                            if transcript_results.get('html_url'):
+                                await creator.send(
+                                    f"Your ticket #{ticket_number} has been closed.\n"
+                                    f"Reason: {reason}\n\n"
+                                    f"View your ticket transcript here: {transcript_results['html_url']}"
+                                )
+                        except:
+                            logger.error(f"Failed to send simplified transcript message to creator")
+
+                # Wait 15 seconds before deleting the channel
+                await asyncio.sleep(15)
                 
                 # Delete the channel
                 await interaction.channel.delete()
                 
-                logger.info(f"Ticket {ticket_number} closed successfully by {interaction.user.name}")
+                # Send confirmation to the staff member
+                await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="✅ Ticket Closed",
+                        description=(
+                            f"Ticket #{ticket_number} has been closed successfully.\n\n"
+                            f"**Close Reason:** {reason}\n"
+                            f"**Transcript:** Sent to logs channel and ticket creator"
+                        ),
+                        color=discord.Color.green()
+                    ),
+                    ephemeral=True
+                )
                 
-            except Exception as close_error:
-                logger.error(f"Error in close ticket workflow: {close_error}")
+            except Exception as e:
+                logger.error(f"Error closing ticket: {e}")
                 await interaction.followup.send(
                     embed=discord.Embed(
                         title="❌ Error",
@@ -492,7 +645,7 @@ class TicketCommands(commands.Cog):
                 )
 
         except Exception as e:
-            logger.error(f"Error in close ticket command: {e}")
+            logger.error(f"Error in enhanced close ticket command: {e}")
             if not interaction.response.is_done():
                 await interaction.response.send_message(
                     embed=discord.Embed(
@@ -502,45 +655,6 @@ class TicketCommands(commands.Cog):
                     ),
                     ephemeral=True
                 )
-
-    def format_transcript(self, ticket_number: str, messages: list, ticket_data: dict, close_reason: str, closed_by: discord.Member) -> str:
-        """Format ticket messages into a readable transcript"""
-        lines = []
-        lines.append("=" * 70)
-        lines.append("FAKEPIXEL GIVEAWAYS - TICKET TRANSCRIPT")
-        lines.append("=" * 70)
-        lines.append(f"TICKET NUMBER: #{ticket_number}")
-        lines.append(f"CATEGORY: {ticket_data.get('category', 'Unknown')}")
-        lines.append(f"CREATOR: {ticket_data.get('creator_id', 'Unknown')}")
-        lines.append(f"CLAIMED BY: {ticket_data.get('claimed_by', 'Unclaimed')}")
-        lines.append(f"CLOSED BY: {closed_by.name}")
-        lines.append(f"CLOSE REASON: {close_reason}")
-        lines.append(f"GENERATED: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        lines.append("=" * 70)
-        lines.append("")
-        
-        for msg in messages:
-            try:
-                timestamp = msg.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')
-                author = msg.author.display_name if hasattr(msg.author, 'display_name') else str(msg.author)
-                content = msg.content or "*[attachment or embed]*"
-                
-                # Clean up content for transcript
-                content = content.replace('\n', ' ').strip()
-                if len(content) > 100:
-                    content = content[:97] + "..."
-                    
-                lines.append(f"[{timestamp}] {author}: {content}")
-            except Exception as e:
-                logger.error(f"Error formatting message for transcript: {e}")
-                continue
-        
-        lines.append("")
-        lines.append("=" * 70)
-        lines.append("END OF TRANSCRIPT")
-        lines.append("=" * 70)
-        
-        return "\n".join(lines)
 
     @app_commands.command(name="ticket_stats")
     @app_commands.describe(ticket_number="The ticket number to get stats for")

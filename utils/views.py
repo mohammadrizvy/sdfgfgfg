@@ -5,7 +5,7 @@ from discord import app_commands
 import logging
 from datetime import datetime
 from . import storage
-
+from .transcript_manager import TranscriptManager
 logger = logging.getLogger('discord')
 
 import asyncio
@@ -116,16 +116,9 @@ class TicketControlsView(discord.ui.View):
             self.claim_button.style = discord.ButtonStyle.success
             self.claim_button.emoji = "🙋"
         else:
-            self.claim_button.label = "Unclaim Ticket"
+            self.claim_button.label = f"{claimed_by} claimed by him"
             self.claim_button.style = discord.ButtonStyle.danger
             self.claim_button.emoji = "❌"
-        
-        # Update the message immediately if it exists
-        if self.message:
-            try:
-                await self.message.edit(view=self)
-            except Exception as e:
-                logger.error(f"Error updating claim button: {e}")
 
     async def claim_ticket_callback(self, interaction: discord.Interaction):
         """Handle claim/unclaim ticket button with proper race condition handling"""
@@ -165,9 +158,12 @@ class TicketControlsView(discord.ui.View):
                 if success:
                     await storage.update_ticket_times(self.ticket_number, "claimed", str(interaction.user.id))
                     
-                    # Update button state and the view
+                    # Update button state
                     await self.update_claim_button_status(interaction.user.display_name)
                     
+                    # Update the view on the original message
+                    await interaction.edit_original_response(view=self)
+
                     # Update embed
                     await self.update_ticket_embed(interaction, claimed_by=interaction.user.display_name)
                     
@@ -188,9 +184,12 @@ class TicketControlsView(discord.ui.View):
                 # Unclaim the ticket
                 success = await storage.claim_ticket(self.ticket_number, "Unclaimed")
                 if success:
-                    # Update button state and the view
+                    # Update button state
                     await self.update_claim_button_status("Unclaimed")
                     
+                    # Update the view on the original message
+                    await interaction.edit_original_response(view=self)
+
                     # Update embed
                     await self.update_ticket_embed(interaction, claimed_by="Unclaimed")
                     
@@ -383,699 +382,6 @@ class TicketControlsView(discord.ui.View):
                     
                     # Update the field value with new claim status
                     status_text = f"✅ Claimed by {claimed_by}" if claimed_by != "Unclaimed" else "🔄 Awaiting Response"
-                    field_value = (
-                        f"**Ticket #:** {self.ticket_number}\n"
-                        f"**Category:** {category}\n"
-                        f"**Status:** {status_text}"
-                    )
-                    embed.set_field_at(i, name=field.name, value=field_value, inline=field.inline)
-                    break
-            
-            # Update the message with new embed
-            await self.message.edit(embed=embed)
-            
-        except Exception as e:
-            logger.error(f"Error updating ticket embed: {e}")
-
-# i hate this code
-    """Main ticket controls with claim and close buttons"""
-    def __init__(self, bot, ticket_number: str, initialize_from_db: bool = True):
-        super().__init__(timeout=None)
-        self.bot = bot
-        self.ticket_number = ticket_number
-        self.message = None
-        self.current_claimer = "Unclaimed"
-        
-        # Initialize button state from database if requested
-        if initialize_from_db:
-            asyncio.create_task(self._initialize_button_state())
-        else:
-            self._setup_buttons()
-
-    async def _initialize_button_state(self):
-        """Initialize button state from database"""
-        try:
-            ticket_data = await storage.get_ticket_log(self.ticket_number)
-            if ticket_data:
-                self.current_claimer = ticket_data.get('claimed_by', 'Unclaimed')
-            
-            self._setup_buttons()
-        except Exception as e:
-            logger.error(f"Error initializing button state for ticket {self.ticket_number}: {e}")
-            self.current_claimer = "Unclaimed"
-            self._setup_buttons()
-
-    def _setup_buttons(self):
-        """Setup buttons with proper custom IDs for persistence"""
-        # Clear existing items
-        self.clear_items()
-        
-        # Determine button state based on current claimer
-        if self.current_claimer == "Unclaimed":
-            button_label = "Claim Ticket"
-            button_style = discord.ButtonStyle.success
-            button_emoji = "🙋"
-        else:
-            button_label = "Unclaim Ticket"
-            button_style = discord.ButtonStyle.danger
-            button_emoji = "❌"
-        
-        # Add claim/unclaim button
-        self.claim_button = discord.ui.Button(
-            label=button_label,
-            style=button_style,
-            emoji=button_emoji,
-            custom_id=f"claim_{self.ticket_number}",
-            row=0
-        )
-        self.claim_button.callback = self.claim_ticket_callback
-        self.add_item(self.claim_button)
-        
-        # Add call for help button
-        self.call_help_button = discord.ui.Button(
-            label="📞 Call for Help",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"call_help_{self.ticket_number}",
-            row=0
-        )
-        self.call_help_button.callback = self.call_help_callback
-        self.add_item(self.call_help_button)
-        
-        # Add close ticket button
-        self.close_button = discord.ui.Button(
-            label="Close Ticket",
-            style=discord.ButtonStyle.danger,
-            emoji="🔒",
-            custom_id=f"close_{self.ticket_number}",
-            row=1
-        )
-        self.close_button.callback = self.close_ticket_callback
-        self.add_item(self.close_button)
-
-    async def update_claim_button_status(self, claimed_by: str):
-        """Update the claim button based on current status"""
-        self.current_claimer = claimed_by
-        
-        if claimed_by == "Unclaimed":
-            self.claim_button.label = "Claim Ticket"
-            self.claim_button.style = discord.ButtonStyle.success
-            self.claim_button.emoji = "🙋"
-        else:
-            self.claim_button.label = "Unclaim Ticket"
-            self.claim_button.style = discord.ButtonStyle.danger
-            self.claim_button.emoji = "❌"
-
-    async def claim_ticket_callback(self, interaction: discord.Interaction):
-        """Handle claim/unclaim ticket button with proper race condition handling"""
-        try:
-            # Defer the response to prevent timeout
-            await interaction.response.defer()
-            
-            # Get fresh ticket data from database to prevent race conditions
-            ticket_data = await storage.get_ticket_log(self.ticket_number)
-            if not ticket_data:
-                await interaction.followup.send("❌ Ticket not found.", ephemeral=True)
-                return
-
-            # Check if user has carrier role for this category
-            category = ticket_data.get('category')
-            carrier_roles = {
-                "Slayer Carry": "Slayer Carrier",
-                "Normal Dungeon Carry": "Normal Dungeon Carrier",
-                "Master Dungeon Carry": "Master Dungeon Carrier",
-                "Staff Applications": "Admin"
-            }
-            
-            required_role = carrier_roles.get(category)
-            if not required_role or not any(role.name in [required_role, "Admin", "Staff", "Moderator"] for role in interaction.user.roles):
-                await interaction.followup.send(
-                    "❌ Only authorized staff can claim tickets for this category.", 
-                    ephemeral=True
-                )
-                return
-
-            # Get current claim status from database (fresh data)
-            current_claimer = ticket_data.get('claimed_by', 'Unclaimed')
-            
-            if current_claimer == "Unclaimed":
-                # Try to claim the ticket
-                success = await storage.claim_ticket(self.ticket_number, interaction.user.display_name)
-                if success:
-                    await storage.update_ticket_times(self.ticket_number, "claimed", str(interaction.user.id))
-                    
-                    # Update button state
-                    await self.update_claim_button_status(interaction.user.display_name)
-                    
-                    # Update embed
-                    await self.update_ticket_embed(interaction, claimed_by=interaction.user.display_name)
-                    
-                    # Update the view on the message
-                    if self.message:
-                        await self.message.edit(view=self)
-                    
-                    # Send claim notification
-                    embed = discord.Embed(
-                        title="✅ Ticket Claimed",
-                        description=f"Ticket has been claimed by {interaction.user.mention}",
-                        color=discord.Color.green(),
-                        timestamp=datetime.utcnow()
-                    )
-                    await interaction.followup.send(embed=embed)
-                    
-                    logger.info(f"Ticket {self.ticket_number} claimed by {interaction.user.name}")
-                else:
-                    await interaction.followup.send("❌ Failed to claim ticket. It may have been claimed by someone else.", ephemeral=True)
-                
-            elif current_claimer == interaction.user.display_name:
-                # Unclaim the ticket
-                success = await storage.claim_ticket(self.ticket_number, "Unclaimed")
-                if success:
-                    # Update button state
-                    await self.update_claim_button_status("Unclaimed")
-                    
-                    # Update embed
-                    await self.update_ticket_embed(interaction, claimed_by="Unclaimed")
-                    
-                    # Update the view on the message
-                    if self.message:
-                        await self.message.edit(view=self)
-                    
-                    # Send unclaim notification
-                    embed = discord.Embed(
-                        title="🔄 Ticket Unclaimed",
-                        description=f"Ticket has been unclaimed by {interaction.user.mention}",
-                        color=discord.Color.orange(),
-                        timestamp=datetime.utcnow()
-                    )
-                    await interaction.followup.send(embed=embed)
-                    
-                    logger.info(f"Ticket {self.ticket_number} unclaimed by {interaction.user.name}")
-                else:
-                    await interaction.followup.send("❌ Failed to unclaim ticket.", ephemeral=True)
-                
-            else:
-                # Someone else has claimed it
-                await interaction.followup.send(
-                    f"❌ This ticket is already claimed by **{current_claimer}**.",
-                    ephemeral=True
-                )
-
-        except Exception as e:
-            logger.error(f"Error in claim_ticket_callback: {e}")
-            try:
-                await interaction.followup.send(
-                    "❌ An error occurred while processing the claim.", 
-                    ephemeral=True
-                )
-            except:
-                pass
-
-    async def call_help_callback(self, interaction: discord.Interaction):
-        """Handle call for help button"""
-        try:
-            # Get ticket data
-            ticket_data = await storage.get_ticket_log(self.ticket_number)
-            if not ticket_data:
-                await interaction.response.send_message("❌ Ticket not found.", ephemeral=True)
-                return
-
-            # Check if ticket has been open for 2 hours
-            creation_time = discord.utils.parse_time(ticket_data.get('created_at'))
-            current_time = discord.utils.utcnow()
-            time_diff = current_time - creation_time
-            
-            if time_diff.total_seconds() < 7200:  # 2 hours = 7200 seconds
-                hours_left = (7200 - time_diff.total_seconds()) / 3600
-                await interaction.response.send_message(
-                    f"⏰ The **Call for Help** button can only be used after your ticket has been open for **2 hours** with no carrier response.\n\n"
-                    f"**Time remaining:** {hours_left:.1f} hours\n\n"
-                    f"*Thank you for your patience! Our carriers will get to you as soon as possible.*",
-                    ephemeral=True
-                )
-                return
-
-            # Get the category from ticket data
-            category = ticket_data.get('category')
-            if not category:
-                await interaction.response.send_message("❌ Could not determine ticket category.", ephemeral=True)
-                return
-
-            # Get carrier role name based on category
-            carrier_role_name = storage.get_category_role(category)
-            if not carrier_role_name:
-                await interaction.response.send_message("❌ No carrier role found for this category.", ephemeral=True)
-                return
-
-            # Check if a carrier has already responded
-            has_carrier_response = False
-            async for message in interaction.channel.history(limit=None):
-                author = message.author
-                if author and any(role.name == carrier_role_name for role in author.roles):
-                    has_carrier_response = True
-                    break
-
-            if has_carrier_response:
-                await interaction.response.send_message(
-                    "✅ A carrier has already responded to your ticket! Please check the conversation above.",
-                    ephemeral=True
-                )
-                return
-
-            # Get the carrier role to mention
-            carrier_role = discord.utils.get(interaction.guild.roles, name=carrier_role_name)
-            if not carrier_role:
-                await interaction.response.send_message(f"❌ {carrier_role_name} role not found.", ephemeral=True)
-                return
-
-            # Send carrier ping with alert
-            ping_embed = discord.Embed(
-                title="🚨 Call for Help - Urgent Assistance Needed",
-                description=(
-                    f"**Ticket:** #{self.ticket_number}\n"
-                    f"**Category:** {category}\n"
-                    f"**Customer:** {interaction.user.mention}\n"
-                    f"**Status:** Open for over 2 hours with no response"
-                ),
-                color=discord.Color.red(),
-                timestamp=datetime.utcnow()
-            )
-            
-            ping_embed.add_field(
-                name="⚠️ Priority Alert",
-                value=(
-                    "This ticket requires immediate attention!\n"
-                    "Please respond as soon as possible to maintain our service quality."
-                ),
-                inline=False
-            )
-            
-            await interaction.channel.send(
-                content=f"{carrier_role.mention} 🚨",
-                embed=ping_embed
-            )
-            
-            await interaction.response.send_message(
-                "✅ Help request sent! A carrier will assist you shortly.",
-                ephemeral=True
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in call help callback: {e}")
-            await interaction.response.send_message(
-                "❌ An error occurred while sending the help request.",
-                ephemeral=True
-            )
-
-    async def close_ticket_callback(self, interaction: discord.Interaction):
-        """Handle ticket closing - staff only"""
-        try:
-            # Check if user has staff permissions
-            if not any(role.name in ["Staff", "Admin", "Moderator", "Carrier"] for role in interaction.user.roles):
-                await interaction.response.send_message(
-                    embed=discord.Embed(
-                        title="❌ Permission Denied",
-                        description="Only staff members can close tickets.",
-                        color=discord.Color.red()
-                    ),
-                    ephemeral=True
-                )
-                return
-
-            # Show the close reason modal
-            modal = CloseReasonModal(self.ticket_number)
-            await interaction.response.send_modal(modal)
-
-        except Exception as e:
-            logger.error(f"Error in close ticket callback: {e}")
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(
-                        embed=discord.Embed(
-                            title="❌ Error",
-                            description="An error occurred while trying to close the ticket.",
-                            color=discord.Color.red()
-                        ),
-                        ephemeral=True
-                    )
-            except Exception:
-                pass
-
-    async def update_ticket_embed(self, interaction: discord.Interaction, claimed_by: str = None):
-        """Update the ticket embed with new claim information"""
-        try:
-            # Get the original embed from the message
-            if not self.message:
-                return
-                
-            embed = self.message.embeds[0] if self.message.embeds else None
-            if not embed:
-                return
-            
-            # Use the provided claimed_by or fetch from database
-            if claimed_by is None:
-                latest_ticket_data = await storage.get_ticket_log(self.ticket_number)
-                if latest_ticket_data:
-                    claimed_by = latest_ticket_data.get('claimed_by', 'Unclaimed')
-                else:
-                    claimed_by = 'Unclaimed'
-            
-            # Find and update the ticket information field
-            for i, field in enumerate(embed.fields):
-                if "Ticket Information" in field.name:
-                    # Get the category from the existing field
-                    field_lines = field.value.split('\n')
-                    category_line = next((line for line in field_lines if "Category:" in line), "**Category:** Unknown")
-                    category = category_line.split('**Category:** ')[1] if '**Category:** ' in category_line else "Unknown"
-                    
-                    # Update the field value with new claim status
-                    status_text = f"✅ Claimed by {claimed_by}" if claimed_by != "Unclaimed" else "🔄 Awaiting Response"
-                    field_value = (
-                        f"**Ticket #:** {self.ticket_number}\n"
-                        f"**Category:** {category}\n"
-                        f"**Status:** {status_text}"
-                    )
-                    embed.set_field_at(i, name=field.name, value=field_value, inline=field.inline)
-                    break
-            
-            # Update the message with new embed
-            await self.message.edit(embed=embed)
-            
-        except Exception as e:
-            logger.error(f"Error updating ticket embed: {e}")
-
-# Keep the rest of the classes (StarRatingView, FeedbackModal, CloseReasonModal) the same as in the previous version...
-    """Main ticket controls with claim and close buttons"""
-    def __init__(self, bot, ticket_number: str):
-        super().__init__(timeout=None)
-        self.bot = bot
-        self.ticket_number = ticket_number
-        self.message = None
-        
-        # Get initial claim status for persistent view setup
-        self._setup_buttons()
-
-    def _setup_buttons(self):
-        """Setup buttons with proper custom IDs for persistence"""
-        # Add claim/unclaim button
-        self.claim_button = discord.ui.Button(
-            label="Claim Ticket",
-            style=discord.ButtonStyle.success,
-            emoji="🙋",
-            custom_id=f"claim_{self.ticket_number}",
-            row=0
-        )
-        self.claim_button.callback = self.claim_ticket_callback
-        self.add_item(self.claim_button)
-        
-        # Add call for help button
-        self.call_help_button = discord.ui.Button(
-            label="📞 Call for Help",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"call_help_{self.ticket_number}",
-            row=0
-        )
-        self.call_help_button.callback = self.call_help_callback
-        self.add_item(self.call_help_button)
-        
-        # Add close ticket button
-        self.close_button = discord.ui.Button(
-            label="Close Ticket",
-            style=discord.ButtonStyle.danger,
-            emoji="🔒",
-            custom_id=f"close_{self.ticket_number}",
-            row=1
-        )
-        self.close_button.callback = self.close_ticket_callback
-        self.add_item(self.close_button)
-
-    async def update_claim_button_status(self, claimed_by: str):
-        """Update the claim button based on current status"""
-        if claimed_by == "Unclaimed":
-            self.claim_button.label = "Claim Ticket"
-            self.claim_button.style = discord.ButtonStyle.success
-            self.claim_button.emoji = "🙋"
-        else:
-            self.claim_button.label = "Unclaim Ticket"
-            self.claim_button.style = discord.ButtonStyle.danger
-            self.claim_button.emoji = "❌"
-
-    async def claim_ticket_callback(self, interaction: discord.Interaction):
-        """Handle claim/unclaim ticket button"""
-        try:
-            # Get ticket data
-            ticket_data = await storage.get_ticket_log(self.ticket_number)
-            if not ticket_data:
-                await interaction.response.send_message("❌ Ticket not found.", ephemeral=True)
-                return
-
-            # Check if user has carrier role for this category
-            category = ticket_data.get('category')
-            carrier_roles = {
-                "Slayer Carry": "Slayer Carrier",
-                "Normal Dungeon Carry": "Normal Dungeon Carrier",
-                "Master Dungeon Carry": "Master Dungeon Carrier",
-                "Staff Applications": "Admin"
-            }
-            
-            required_role = carrier_roles.get(category)
-            if not required_role or not any(role.name in [required_role, "Admin", "Staff"] for role in interaction.user.roles):
-                await interaction.response.send_message(
-                    "❌ Only authorized staff can claim tickets for this category.", 
-                    ephemeral=True
-                )
-                return
-
-            # Get current claim status
-            current_claimer = await storage.get_ticket_claimed_by(self.ticket_number)
-            
-            if current_claimer == "Unclaimed":
-                # Claim the ticket
-                success = await storage.claim_ticket(self.ticket_number, interaction.user.display_name)
-                if success:
-                    await storage.update_ticket_times(self.ticket_number, "claimed", str(interaction.user.id))
-                    
-                    # Update button
-                    await self.update_claim_button_status(interaction.user.display_name)
-                    
-                    # Update embed
-                    await self.update_ticket_embed(interaction, claimed_by=interaction.user.display_name)
-                    
-                    # Update the view
-                    await interaction.response.edit_message(view=self)
-                    
-                    # Send claim notification
-                    embed = discord.Embed(
-                        title="✅ Ticket Claimed",
-                        description=f"Ticket has been claimed by {interaction.user.mention}",
-                        color=discord.Color.green(),
-                        timestamp=datetime.utcnow()
-                    )
-                    await interaction.followup.send(embed=embed)
-                    
-                    logger.info(f"Ticket {self.ticket_number} claimed by {interaction.user.name}")
-                else:
-                    await interaction.response.send_message("❌ Failed to claim ticket.", ephemeral=True)
-                
-            elif current_claimer == interaction.user.display_name:
-                # Unclaim the ticket
-                success = await storage.claim_ticket(self.ticket_number, "Unclaimed")
-                if success:
-                    # Update button
-                    await self.update_claim_button_status("Unclaimed")
-                    
-                    # Update embed
-                    await self.update_ticket_embed(interaction, claimed_by="Unclaimed")
-                    
-                    # Update the view
-                    await interaction.response.edit_message(view=self)
-                    
-                    # Send unclaim notification
-                    embed = discord.Embed(
-                        title="🔄 Ticket Unclaimed",
-                        description=f"Ticket has been unclaimed by {interaction.user.mention}",
-                        color=discord.Color.orange(),
-                        timestamp=datetime.utcnow()
-                    )
-                    await interaction.followup.send(embed=embed)
-                    
-                    logger.info(f"Ticket {self.ticket_number} unclaimed by {interaction.user.name}")
-                else:
-                    await interaction.response.send_message("❌ Failed to unclaim ticket.", ephemeral=True)
-                
-            else:
-                # Someone else has claimed it
-                await interaction.response.send_message(
-                    f"❌ This ticket is already claimed by **{current_claimer}**.",
-                    ephemeral=True
-                )
-
-        except Exception as e:
-            logger.error(f"Error in claim_ticket_callback: {e}")
-            await interaction.response.send_message(
-                "❌ An error occurred while processing the claim.", 
-                ephemeral=True
-            )
-
-    async def call_help_callback(self, interaction: discord.Interaction):
-        """Handle call for help button"""
-        try:
-            # Get ticket data
-            ticket_data = await storage.get_ticket_log(self.ticket_number)
-            if not ticket_data:
-                await interaction.response.send_message("❌ Ticket not found.", ephemeral=True)
-                return
-
-            # Check if ticket has been open for 2 hours
-            creation_time = discord.utils.parse_time(ticket_data.get('created_at'))
-            current_time = discord.utils.utcnow()
-            time_diff = current_time - creation_time
-            
-            if time_diff.total_seconds() < 7200:  # 2 hours = 7200 seconds
-                hours_left = (7200 - time_diff.total_seconds()) / 3600
-                await interaction.response.send_message(
-                    f"⏰ The **Call for Help** button can only be used after your ticket has been open for **2 hours** with no carrier response.\n\n"
-                    f"**Time remaining:** {hours_left:.1f} hours\n\n"
-                    f"*Thank you for your patience! Our carriers will get to you as soon as possible.*",
-                    ephemeral=True
-                )
-                return
-
-            # Get the category from ticket data
-            category = ticket_data.get('category')
-            if not category:
-                await interaction.response.send_message("❌ Could not determine ticket category.", ephemeral=True)
-                return
-
-            # Get carrier role name based on category
-            carrier_role_name = storage.get_category_role(category)
-            if not carrier_role_name:
-                await interaction.response.send_message("❌ No carrier role found for this category.", ephemeral=True)
-                return
-
-            # Check if a carrier has already responded
-            has_carrier_response = False
-            async for message in interaction.channel.history(limit=None):
-                author = message.author
-                if author and any(role.name == carrier_role_name for role in author.roles):
-                    has_carrier_response = True
-                    break
-
-            if has_carrier_response:
-                await interaction.response.send_message(
-                    "✅ A carrier has already responded to your ticket! Please check the conversation above.",
-                    ephemeral=True
-                )
-                return
-
-            # Get the carrier role to mention
-            carrier_role = discord.utils.get(interaction.guild.roles, name=carrier_role_name)
-            if not carrier_role:
-                await interaction.response.send_message(f"❌ {carrier_role_name} role not found.", ephemeral=True)
-                return
-
-            # Send carrier ping with alert
-            ping_embed = discord.Embed(
-                title="🚨 Call for Help - Urgent Assistance Needed",
-                description=(
-                    f"**Ticket:** #{self.ticket_number}\n"
-                    f"**Category:** {category}\n"
-                    f"**Customer:** {interaction.user.mention}\n"
-                    f"**Status:** Open for over 2 hours with no response"
-                ),
-                color=discord.Color.red(),
-                timestamp=datetime.utcnow()
-            )
-            
-            ping_embed.add_field(
-                name="⚠️ Priority Alert",
-                value=(
-                    "This ticket requires immediate attention!\n"
-                    "Please respond as soon as possible to maintain our service quality."
-                ),
-                inline=False
-            )
-            
-            await interaction.channel.send(
-                content=f"{carrier_role.mention} 🚨",
-                embed=ping_embed
-            )
-            
-            await interaction.response.send_message(
-                "✅ Help request sent! A carrier will assist you shortly.",
-                ephemeral=True
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in call help callback: {e}")
-            await interaction.response.send_message(
-                "❌ An error occurred while sending the help request.",
-                ephemeral=True
-            )
-
-    async def close_ticket_callback(self, interaction: discord.Interaction):
-        """Handle ticket closing - staff only"""
-        try:
-            # Check if user has staff permissions
-            if not any(role.name in ["Staff", "Admin", "Moderator", "Carrier"] for role in interaction.user.roles):
-                await interaction.response.send_message(
-                    embed=discord.Embed(
-                        title="❌ Permission Denied",
-                        description="Only staff members can close tickets.",
-                        color=discord.Color.red()
-                    ),
-                    ephemeral=True
-                )
-                return
-
-            # Show the close reason modal
-            modal = CloseReasonModal(self.ticket_number)
-            await interaction.response.send_modal(modal)
-
-        except Exception as e:
-            logger.error(f"Error in close ticket callback: {e}")
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(
-                        embed=discord.Embed(
-                            title="❌ Error",
-                            description="An error occurred while trying to close the ticket.",
-                            color=discord.Color.red()
-                        ),
-                        ephemeral=True
-                    )
-            except Exception:
-                pass
-
-    async def update_ticket_embed(self, interaction: discord.Interaction, claimed_by: str = None):
-        """Update the ticket embed with new claim information"""
-        try:
-            # Get the original embed from the message
-            if not self.message:
-                return
-                
-            embed = self.message.embeds[0] if self.message.embeds else None
-            if not embed:
-                return
-            
-            # Fetch the latest ticket data from the database
-            latest_ticket_data = await storage.get_ticket_log(self.ticket_number)
-            if not latest_ticket_data:
-                logger.warning(f"Could not fetch latest ticket data for {self.ticket_number} in update_ticket_embed.")
-                return
-
-            # Use the claimed_by status from the latest ticket data
-            current_claimed_by = latest_ticket_data.get('claimed_by', 'Unclaimed')
-            
-            # Find and update the ticket information field
-            for i, field in enumerate(embed.fields):
-                if "Ticket Information" in field.name:
-                    # Get the category from the existing field
-                    field_lines = field.value.split('\n')
-                    category_line = next((line for line in field_lines if "Category:" in line), "**Category:** Unknown")
-                    category = category_line.split('**Category:** ')[1] if '**Category:** ' in category_line else "Unknown"
-                    
-                    # Update the field value with new claim status
-                    status_text = f"✅ Claimed by {current_claimed_by}" if current_claimed_by != "Unclaimed" else "🔄 Awaiting Response"
                     field_value = (
                         f"**Ticket #:** {self.ticket_number}\n"
                         f"**Category:** {category}\n"
@@ -1302,64 +608,34 @@ class FeedbackModal(discord.ui.Modal, title="✨ Share Your Experience"):
     async def send_thank_you_message(self, interaction: discord.Interaction):
         """Send a personalized thank you message to the user"""
         try:
-            # Customize message based on rating
-            if self.rating >= 4:
-                title = "🌟 Thank You for the Great Feedback!"
-                description = "We're thrilled to hear about your positive experience!"
-                color = discord.Color.green()
-            elif self.rating >= 3:
-                title = "💙 Thank You for Your Feedback!"
-                description = "We appreciate you taking the time to share your experience."
-                color = discord.Color.blue()
-            else:
-                title = "🔧 Thank You for Helping Us Improve!"
-                description = "Your feedback is valuable and will help us provide better service."
-                color = discord.Color.orange()
+            # Determine the star representation
+            stars_display = '⭐' * self.rating + '☆' * (5 - self.rating)
 
             thank_you_embed = discord.Embed(
-                title=title,
-                description=description,
-                color=color,
-                timestamp=datetime.utcnow()
-            )
-            
-            # Add feedback summary
-            thank_you_embed.add_field(
-                name="📋 Your Feedback Summary",
-                value=f"**Rating:** {'⭐' * self.rating} ({self.rating}/5)",
-                inline=False
-            )
-            
-            thank_you_embed.add_field(
-                name="💭 What You Shared",
-                value=f"*\"{self.feedback.value[:100]}{'...' if len(self.feedback.value) > 100 else ''}\"*",
-                inline=False
-            )
-            
-            if self.suggestions.value:
-                thank_you_embed.add_field(
-                    name="💡 Your Suggestions",
-                    value=f"*\"{self.suggestions.value[:100]}{'...' if len(self.suggestions.value) > 100 else ''}\"*",
-                    inline=False
-                )
-            
-            thank_you_embed.add_field(
-                name="🚀 What Happens Next?",
-                value=(
-                    "• Your feedback has been shared with our team\n"
-                    "• We'll use it to improve our support services\n"
-                    "• Feel free to create another ticket if you need help!"
+                title="Thank you for your rating!",
+                description=(
+                    f"{interaction.user.mention}, you have successfully rated our Staff's\n" 
+                    f"dialog for {stars_display} in Ticket **{self.ticket_number}**. We will for sure improve thanks to\n" 
+                    "your reviews!"
                 ),
+                color=discord.Color.from_rgb(47, 49, 54) # Dark Discord-like color
+            )
+
+            # Add feedback comment
+            comment_text = self.feedback.value if self.feedback.value else "No comment provided."
+            thank_you_embed.add_field(
+                name="Here's what you wrote in review:",
+                value=f"""```\n{comment_text}\n```""",
                 inline=False
             )
-            
-            thank_you_embed.set_footer(
-                text=f"Ticket #{self.ticket_number} • Your voice matters to us!",
-                icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None
-            )
-            
+
+            # Set thumbnail from provided image
+            thank_you_embed.set_thumbnail(url="https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo")
+
+            # No footer needed as per the image
+
             await interaction.response.send_message(embed=thank_you_embed, ephemeral=True)
-            
+
         except Exception as e:
             logger.error(f"Error sending thank you message: {e}")
             # Fallback simple message
@@ -1411,58 +687,108 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
                         description=(
                             f"This ticket will be deleted in 10 seconds...\n\n"
                             f"**Close Reason:** {self.reason.value}\n"
-                            f"**Closed by:** {interaction.user.mention}"
+                            f"**Closed by:** {interaction.user.mention}\n\n"
+                            f"📋 **Generating transcript...** Please wait..."
                         ),
                         color=discord.Color.blue()
                     )
+                )
+                
+                # Get all messages from the ticket channel
+                messages = []
+                async for msg in interaction.channel.history(limit=None, oldest_first=True):
+                    messages.append(msg)
+                
+                # Initialize transcript manager
+                transcript_manager = TranscriptManager(interaction.client)
+                
+                # Generate comprehensive transcript (both HTML and text)
+                transcript_results = await transcript_manager.generate_comprehensive_transcript(
+                    self.ticket_number, messages, ticket_data
                 )
                 
                 # Send transcript to logs channel if it exists
                 transcript_channel = discord.utils.get(interaction.guild.channels, name="ticket-transcripts")
                 if transcript_channel:
                     try:
-                        # Get all messages from the ticket channel
-                        messages = []
-                        async for msg in interaction.channel.history(limit=None, oldest_first=True):
-                            messages.append(msg)
+                        # Create enhanced transcript embed
+                        transcript_embed = discord.Embed(
+                            title="📋 Ticket Transcript Generated",
+                            description=f"**Ticket #{self.ticket_number}** has been closed and archived",
+                            color=discord.Color.blue(),
+                            timestamp=datetime.utcnow()
+                        )
                         
-                        # Create transcript content
-                        transcript_content = self.format_transcript(messages, ticket_data, interaction.user)
+                        # Add ticket information
+                        transcript_embed.add_field(
+                            name="🎫 Ticket Information",
+                            value=(
+                                f"**Category:** {ticket_data.get('category', 'Unknown')}\n"
+                                f"**Creator:** <@{ticket_data.get('creator_id', 'Unknown')}>\n"
+                                f"**Claimed By:** {ticket_data.get('claimed_by', 'Unclaimed')}\n"
+                                f"**Closed By:** {interaction.user.mention}\n"
+                                f"**Close Reason:** {self.reason.value}"
+                            ),
+                            inline=True
+                        )
                         
-                        # Save transcript to file
-                        import os
-                        os.makedirs('transcripts', exist_ok=True)
-                        transcript_file = f"transcripts/ticket_{self.ticket_number}.txt"
+                        # Add statistics
+                        transcript_embed.add_field(
+                            name="📊 Statistics",
+                            value=(
+                                f"**Total Messages:** {len(messages)}\n"
+                                f"**Participants:** {len(set(msg.author.id for msg in messages))}\n"
+                                f"**Duration:** Multiple hours"
+                            ),
+                            inline=True
+                        )
                         
-                        with open(transcript_file, 'w', encoding='utf-8') as f:
-                            f.write(transcript_content)
+                        # Add transcript links
+                        transcript_links = []
+                        if transcript_results.get('html_url'):
+                            transcript_links.append(f"🌐 [**View HTML Transcript**]({transcript_results['html_url']})")
                         
-                        # Send transcript to channel
-                        with open(transcript_file, 'rb') as f:
-                            file = discord.File(f, filename=f"ticket_{self.ticket_number}_transcript.txt")
-                            
-                            transcript_embed = discord.Embed(
-                                title="📋 Ticket Transcript",
-                                description=f"Transcript for ticket #{self.ticket_number}",
-                                color=discord.Color.blue(),
-                                timestamp=datetime.utcnow()
-                            )
+                        if transcript_results.get('text_file'):
+                            # Also send the text file as attachment
+                            transcript_links.append("📄 **Text Transcript** (attached)")
+                        
+                        if transcript_links:
                             transcript_embed.add_field(
-                                name="Ticket Information",
-                                value=(
-                                    f"**Category:** {ticket_data.get('category', 'Unknown')}\n"
-                                    f"**Creator:** <@{ticket_data.get('creator_id', 'Unknown')}>\n"
-                                    f"**Claimed By:** {ticket_data.get('claimed_by', 'Unclaimed')}\n"
-                                    f"**Closed By:** {interaction.user.mention}\n"
-                                    f"**Close Reason:** {self.reason.value}"
-                                ),
+                                name="🔗 Transcript Links",
+                                value="\n".join(transcript_links),
                                 inline=False
                             )
-                            
-                            await transcript_channel.send(embed=transcript_embed, file=file)
+                        
+                        transcript_embed.set_footer(
+                            text="FakePixel Giveaways • Enhanced Transcript System",
+                            icon_url="https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo"
+                        )
+                        
+                        # Send transcript embed
+                        files = []
+                        if transcript_results.get('text_file'):
+                            files.append(discord.File(transcript_results['text_file'], 
+                                                     filename=f"ticket_{self.ticket_number}_transcript.txt"))
+                        
+                        await transcript_channel.send(embed=transcript_embed, files=files)
+                        
+                        # Store transcript metadata
+                        await transcript_manager.store_transcript_metadata(self.ticket_number, {
+                            **transcript_results,
+                            'message_count': len(messages),
+                            'participants': list(set(str(msg.author.id) for msg in messages))
+                        })
                         
                     except Exception as transcript_error:
-                        logger.error(f"Error creating transcript: {transcript_error}")
+                        logger.error(f"Error sending transcript: {transcript_error}")
+                        # Send fallback message
+                        await transcript_channel.send(
+                            embed=discord.Embed(
+                                title="⚠️ Transcript Generation Error",
+                                description=f"Failed to generate transcript for ticket #{self.ticket_number}",
+                                color=discord.Color.orange()
+                            )
+                        )
                 
                 # Send feedback request to user
                 try:
@@ -1473,13 +799,37 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
                             view = StarRatingView(self.ticket_number, int(creator_id))
                             
                             feedback_embed = discord.Embed(
-                                title="⭐ Rate Your Experience",
+                                title="🌟 Your Feedback Matters! Rate Your Service 🌟",
                                 description=(
-                                    f"Hi {creator.name}! Your ticket **#{self.ticket_number}** has been closed.\n\n"
-                                    f"We'd love to hear about your experience with our support team!"
+                                    f"Hello {creator.name}! Your ticket **#{self.ticket_number}** has been successfully closed.\n\n"
+                                    "We hope you had a great experience with our support team. Your feedback helps us improve and provide even better service!\n\n"
+                                    "Please take a moment to rate your overall experience below. It's quick, easy, and incredibly valuable to us!"
                                 ),
-                                color=discord.Color.gold()
+                                color=discord.Color.from_rgb(255, 215, 0)
                             )
+                            
+                            # Add transcript link to feedback if available
+                            if transcript_results.get('html_url'):
+                                feedback_embed.add_field(
+                                    name="📋 Your Transcript",
+                                    value=f"[**View your ticket transcript here**]({transcript_results['html_url']})",
+                                    inline=False
+                                )
+                            
+                            feedback_embed.add_field(
+                                name="💡 Why Your Feedback is Important",
+                                value="Your ratings and comments help us identify areas of improvement, recognize outstanding staff, and enhance our services for everyone.",
+                                inline=False
+                            )
+                            feedback_embed.add_field(
+                                name="✅ What Happens Next?",
+                                value="Once you submit your rating, your feedback will be reviewed by our team. Thank you for helping us grow!",
+                                inline=False
+                            )
+                            feedback_embed.set_footer(
+                                text="FakePixel Giveaways • Customer Satisfaction Survey"
+                            )
+                            feedback_embed.set_thumbnail(url='https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo')
                             
                             try:
                                 await creator.send(embed=feedback_embed, view=view)
@@ -1489,7 +839,7 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
                 except Exception as feedback_error:
                     logger.error(f"Error sending feedback request: {feedback_error}")
                 
-                # Store the ticket log with messages
+                # Store the ticket log with all messages
                 await storage.store_ticket_log(
                     ticket_number=self.ticket_number,
                     messages=messages,
@@ -1502,13 +852,26 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
                     close_reason=self.reason.value
                 )
                 
+                # Update the closing message with transcript status
+                await interaction.channel.send(
+                    embed=discord.Embed(
+                        title="✅ Transcript Generated Successfully",
+                        description=(
+                            f"📋 Transcript has been generated and saved!\n"
+                            f"🔗 Check {transcript_channel.mention if transcript_channel else '#ticket-transcripts'} for the full transcript\n\n"
+                            f"⏰ Channel will be deleted in 5 seconds..."
+                        ),
+                        color=discord.Color.green()
+                    )
+                )
+                
                 # Wait before deleting the channel
                 await asyncio.sleep(10)
                 
                 # Delete the channel
                 await interaction.channel.delete()
                 
-                logger.info(f"Ticket {self.ticket_number} closed successfully by {interaction.user.name}")
+                logger.info(f"Ticket {self.ticket_number} closed successfully by {interaction.user.name} with enhanced transcript")
                 
             except Exception as close_error:
                 logger.error(f"Error in close ticket workflow: {close_error}")
@@ -1532,42 +895,3 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
                     ),
                     ephemeral=True
                 )
-
-    def format_transcript(self, messages: list, ticket_data: dict, closed_by: discord.Member) -> str:
-        """Format ticket messages into a readable transcript"""
-        lines = []
-        lines.append("=" * 70)
-        lines.append("FAKEPIXEL GIVEAWAYS - TICKET TRANSCRIPT")
-        lines.append("=" * 70)
-        lines.append(f"TICKET NUMBER: #{self.ticket_number}")
-        lines.append(f"CATEGORY: {ticket_data.get('category', 'Unknown')}")
-        lines.append(f"CREATOR: {ticket_data.get('creator_id', 'Unknown')}")
-        lines.append(f"CLAIMED BY: {ticket_data.get('claimed_by', 'Unclaimed')}")
-        lines.append(f"CLOSED BY: {closed_by.name}")
-        lines.append(f"CLOSE REASON: {self.reason.value}")
-        lines.append(f"GENERATED: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        lines.append("=" * 70)
-        lines.append("")
-        
-        for msg in messages:
-            try:
-                timestamp = msg.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')
-                author = msg.author.display_name if hasattr(msg.author, 'display_name') else str(msg.author)
-                content = msg.content or "*[attachment or embed]*"
-                
-                # Clean up content for transcript
-                content = content.replace('\n', ' ').strip()
-                if len(content) > 100:
-                    content = content[:97] + "..."
-                    
-                lines.append(f"[{timestamp}] {author}: {content}")
-            except Exception as e:
-                logger.error(f"Error formatting message for transcript: {e}")
-                continue
-        
-        lines.append("")
-        lines.append("=" * 70)
-        lines.append("END OF TRANSCRIPT")
-        lines.append("=" * 70)
-        
-        return "\n".join(lines)

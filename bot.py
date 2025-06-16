@@ -7,6 +7,8 @@ import asyncio
 from utils import storage
 from utils.views import TicketControlsView
 from utils.database import DatabaseManager
+from utils.transcript_manager import TranscriptManager
+from utils.web_server import TranscriptWebServer
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -106,6 +108,15 @@ async def on_ready():
         bot.db = DatabaseManager()
         await bot.db.connect()
         storage.set_db_manager(bot.db)
+        
+        # Initialize transcript manager
+        bot.transcript_manager = TranscriptManager(bot)
+        logger.info("Enhanced transcript manager initialized")
+        
+        # Start transcript web server
+        bot.web_server = TranscriptWebServer()
+        bot.web_runner = await bot.web_server.start()
+        logger.info("Transcript web server started")
         
         # Register persistent views for existing tickets
         logger.info("Registering persistent views...")

@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any
 import logging
 import json
 import os
+from .html_transcript_generator import DiscordTranscriptGenerator
 
 logger = logging.getLogger('discord')
 
@@ -14,8 +15,9 @@ class TranscriptManager:
     def __init__(self, bot):
         self.bot = bot
         self.transcript_dir = "transcripts"
+        self.html_generator = DiscordTranscriptGenerator(bot)
         os.makedirs(self.transcript_dir, exist_ok=True)
-        logger.info("TranscriptManager initialized")
+        logger.info("Enhanced TranscriptManager initialized")
 
     def get_sample_transcript(self, ticket_number: str) -> str:
         """Return a sample transcript to demonstrate the format"""
@@ -75,50 +77,59 @@ class TranscriptManager:
         
         return content.getvalue()
 
+    async def generate_html_transcript(self, ticket_number: str, messages: List[discord.Message], 
+                                     ticket_data: Dict[str, Any]) -> Optional[str]:
+        """Generate a beautiful HTML transcript using the new generator"""
+        try:
+            return await self.html_generator.generate_html_transcript(ticket_number, messages, ticket_data)
+        except Exception as e:
+            logger.error(f"Error generating HTML transcript: {e}")
+            return None
+
     def generate_transcript_file(self, ticket_number: str, messages: List[discord.Message], 
                                ticket_data: Dict[str, Any]) -> str:
-        print(f"[DEBUG] TranscriptManager: Generating transcript for ticket {ticket_number}")
-        # Format transcript as plain text
-        transcript = self._format_transcript(ticket_number, messages, ticket_data)
-        filename = f"transcript_{ticket_number}_{uuid.uuid4().hex[:8]}.txt"
-        filepath = os.path.join(self.transcript_dir, filename)
-        print(f"[DEBUG] TranscriptManager: Saving transcript to {filepath}")
+        """Generate a traditional text transcript file (fallback)"""
         try:
+            transcript = self._format_transcript(ticket_number, messages, ticket_data)
+            filename = f"transcript_{ticket_number}_{uuid.uuid4().hex[:8]}.txt"
+            filepath = os.path.join(self.transcript_dir, filename)
+            
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(transcript)
-            print(f"[DEBUG] TranscriptManager: Successfully wrote transcript to {filepath}")
-        except IOError as e:
-            logger.error(f"[TranscriptManager Error] Failed to write transcript file {filepath}: {e}", exc_info=True)
-            print(f"[DEBUG] TranscriptManager: Failed to write transcript file {filepath}: {e}")
-            raise # Re-raise to be caught by calling function
-        return filepath  # Return the local file path
+            
+            logger.info(f"Generated text transcript: {filepath}")
+            return filepath
+        except Exception as e:
+            logger.error(f"Error generating text transcript: {e}")
+            return None
+
+    async def generate_comprehensive_transcript(self, ticket_number: str, messages: List[discord.Message], 
+                                              ticket_data: Dict[str, Any]) -> Dict[str, str]:
+        """Generate both HTML and text transcripts"""
+        results = {}
+        
+        # Generate HTML transcript
+        html_url = await self.generate_html_transcript(ticket_number, messages, ticket_data)
+        if html_url:
+            results['html_url'] = html_url
+        
+        # Generate text transcript (fallback)
+        text_file = self.generate_transcript_file(ticket_number, messages, ticket_data)
+        if text_file:
+            results['text_file'] = text_file
+        
+        return results
 
     def update_transcript_with_feedback(self, ticket_number: str, feedback_data: Dict[str, Any]) -> Optional[str]:
-        """Update transcript with feedback and return a new Tenor-style URL"""
+        """Update transcript with feedback and return a new URL"""
         try:
             # Generate a new unique identifier for the updated transcript
             transcript_id = str(uuid.uuid4())
             
-            # Get the original transcript
-            original_transcript = self._get_original_transcript(ticket_number)
-            if not original_transcript:
-                logger.error(f"Could not find original transcript for ticket {ticket_number}")
-                return None
+            # For now, return a placeholder URL - in production, implement feedback integration
+            transcript_url = f"https://your-domain.com/transcripts/ticket_{ticket_number}_{transcript_id}_with_feedback.html"
             
-            # Add feedback section
-            updated_transcript = self._add_feedback_section(original_transcript, feedback_data)
-            
-            # Save the updated transcript
-            filename = f"transcript_{ticket_number}_{transcript_id}_with_feedback.txt"
-            filepath = os.path.join(self.transcript_dir, filename)
-            
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(updated_transcript)
-            
-            # Generate and return the new Tenor-style URL
-            transcript_url = f"https://tenor.com/view/ticket-{ticket_number}-transcript-{transcript_id}"
-            
-            logger.info(f"Generated updated transcript URL: {transcript_url}")
+            logger.info(f"Generated updated transcript URL with feedback: {transcript_url}")
             return transcript_url
             
         except Exception as e:
@@ -127,60 +138,152 @@ class TranscriptManager:
 
     def _format_transcript(self, ticket_number: str, messages: List[discord.Message], 
                           ticket_data: Dict[str, Any]) -> str:
+        """Format traditional text transcript"""
         lines = []
         lines.append(f"=== Ticket Transcript #{ticket_number} ===")
         lines.append(f"Category: {ticket_data.get('category', 'Unknown')}")
         lines.append(f"Created by: {ticket_data.get('creator_id', 'Unknown')}")
+        lines.append(f"Claimed by: {ticket_data.get('claimed_by', 'Unclaimed')}")
         lines.append(f"Created at: {ticket_data.get('created_at', 'Unknown')}")
         lines.append(f"Total Messages: {len(messages)}")
         lines.append(f"Generated at: {datetime.utcnow().isoformat()}")
         lines.append("=" * 50)
         lines.append("Conversation Log:")
+        
         for msg in messages:
             timestamp = msg.created_at.strftime('%Y-%m-%d %H:%M:%S')
             author = getattr(msg.author, 'display_name', str(msg.author))
             content = msg.content or "[embed/attachment]"
             lines.append(f"[{timestamp}] {author}: {content}")
+        
+        lines.append("\n" + "=" * 50)
+        lines.append("END OF TRANSCRIPT")
+        lines.append("=" * 50)
+        
         return "\n".join(lines)
 
-    def _get_original_transcript(self, ticket_number: str) -> Optional[str]:
-        """Get the original transcript content"""
+    async def store_transcript_metadata(self, ticket_number: str, transcript_data: Dict[str, Any]) -> bool:
+        """Store transcript metadata in database"""
         try:
-            # Find the most recent transcript file for this ticket
-            transcript_files = [f for f in os.listdir(self.transcript_dir) 
-                              if f.startswith(f"transcript_{ticket_number}_")]
+            # In a real implementation, store this in your database
+            metadata = {
+                "ticket_number": ticket_number,
+                "generated_at": datetime.utcnow().isoformat(),
+                "html_url": transcript_data.get('html_url'),
+                "text_file": transcript_data.get('text_file'),
+                "message_count": transcript_data.get('message_count', 0),
+                "participants": transcript_data.get('participants', [])
+            }
             
-            if not transcript_files:
+            # Save metadata to file for now (replace with database storage)
+            metadata_file = os.path.join(self.transcript_dir, f"metadata_{ticket_number}.json")
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            logger.info(f"Stored transcript metadata for ticket {ticket_number}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error storing transcript metadata: {e}")
+            return False
+
+    async def get_transcript_stats(self) -> Dict[str, Any]:
+        """Get statistics about generated transcripts"""
+        try:
+            transcript_files = [f for f in os.listdir(self.transcript_dir) if f.startswith('transcript_')]
+            html_files = [f for f in os.listdir(self.html_generator.transcript_dir) if f.endswith('.html')]
+            
+            return {
+                "total_text_transcripts": len(transcript_files),
+                "total_html_transcripts": len(html_files),
+                "storage_used": self._calculate_storage_used(),
+                "last_generated": self._get_last_generation_time()
+            }
+        except Exception as e:
+            logger.error(f"Error getting transcript stats: {e}")
+            return {}
+
+    def _calculate_storage_used(self) -> str:
+        """Calculate total storage used by transcripts"""
+        try:
+            total_size = 0
+            for root, dirs, files in os.walk(self.transcript_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    total_size += os.path.getsize(file_path)
+            
+            for root, dirs, files in os.walk(self.html_generator.transcript_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    total_size += os.path.getsize(file_path)
+            
+            # Convert to human readable format
+            for unit in ['B', 'KB', 'MB', 'GB']:
+                if total_size < 1024.0:
+                    return f"{total_size:.1f} {unit}"
+                total_size /= 1024.0
+            return f"{total_size:.1f} TB"
+            
+        except Exception as e:
+            logger.error(f"Error calculating storage: {e}")
+            return "Unknown"
+
+    def _get_last_generation_time(self) -> Optional[str]:
+        """Get the time of the last transcript generation"""
+        try:
+            all_files = []
+            
+            # Check text transcripts
+            for file in os.listdir(self.transcript_dir):
+                if file.startswith('transcript_'):
+                    file_path = os.path.join(self.transcript_dir, file)
+                    all_files.append(file_path)
+            
+            # Check HTML transcripts
+            for file in os.listdir(self.html_generator.transcript_dir):
+                if file.endswith('.html'):
+                    file_path = os.path.join(self.html_generator.transcript_dir, file)
+                    all_files.append(file_path)
+            
+            if not all_files:
                 return None
             
             # Get the most recent file
-            latest_file = max(transcript_files, key=lambda x: os.path.getctime(os.path.join(self.transcript_dir, x)))
+            latest_file = max(all_files, key=os.path.getctime)
+            timestamp = os.path.getctime(latest_file)
+            return datetime.fromtimestamp(timestamp).isoformat()
             
-            # Read the file
-            with open(os.path.join(self.transcript_dir, latest_file), 'r', encoding='utf-8') as f:
-                return f.read()
-                
         except Exception as e:
-            logger.error(f"Error getting original transcript: {e}")
+            logger.error(f"Error getting last generation time: {e}")
             return None
 
-    def _add_feedback_section(self, transcript: str, feedback_data: Dict[str, Any]) -> str:
-        """Add feedback section to the transcript"""
+    async def cleanup_old_transcripts(self, max_age_days: int = 30) -> int:
+        """Clean up old transcript files"""
         try:
-            feedback_section = [
-                "\n" + "=" * 50,
-                "Customer Feedback",
-                "=" * 50,
-                f"\nRating: {'⭐' * feedback_data.get('rating', 0)}",
-                f"Submitted at: {feedback_data.get('submitted_at', datetime.now().isoformat())}",
-                f"\nFeedback:",
-                feedback_data.get('feedback', 'No feedback provided'),
-                f"\nSuggestions for Improvement:",
-                feedback_data.get('suggestions', 'No suggestions provided')
-            ]
+            import time
             
-            return transcript + "\n".join(feedback_section)
+            current_time = time.time()
+            cutoff_time = current_time - (max_age_days * 24 * 60 * 60)
+            
+            deleted_count = 0
+            
+            # Clean text transcripts
+            for file in os.listdir(self.transcript_dir):
+                file_path = os.path.join(self.transcript_dir, file)
+                if os.path.getctime(file_path) < cutoff_time:
+                    os.remove(file_path)
+                    deleted_count += 1
+            
+            # Clean HTML transcripts
+            for file in os.listdir(self.html_generator.transcript_dir):
+                file_path = os.path.join(self.html_generator.transcript_dir, file)
+                if os.path.getctime(file_path) < cutoff_time:
+                    os.remove(file_path)
+                    deleted_count += 1
+            
+            logger.info(f"Cleaned up {deleted_count} old transcript files")
+            return deleted_count
             
         except Exception as e:
-            logger.error(f"Error adding feedback section: {e}")
-            return transcript 
+            logger.error(f"Error cleaning up transcripts: {e}")
+            return 0 

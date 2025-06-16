@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import logging
 from utils import storage
+from datetime import datetime
 
 logger = logging.getLogger('discord')
 
@@ -256,7 +257,8 @@ class AdminCommands(commands.Cog):
 
             # Add footer
             embed.set_footer(
-                text="FakePixel Giveaways • Carry Services",
+                text="fakepixle giveaways • Carry Services",
+                icon_url=interaction.guild.icon.url if interaction.guild.icon else None
             )
 
             # Add thumbnail
@@ -371,6 +373,129 @@ class AdminCommands(commands.Cog):
                 )
             except:
                 pass
+
+    @app_commands.command(name="transcript_stats")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def transcript_stats(self, interaction: discord.Interaction):
+        """View transcript system statistics (Admin only)"""
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            # Get transcript statistics
+            stats = await interaction.client.transcript_manager.get_transcript_stats()
+            
+            embed = discord.Embed(
+                title="📊 Transcript System Statistics",
+                description="Overview of the enhanced transcript system",
+                color=discord.Color.blue(),
+                timestamp=datetime.utcnow()
+            )
+            
+            embed.add_field(
+                name="📋 Generated Transcripts",
+                value=(
+                    f"**HTML Transcripts:** {stats.get('total_html_transcripts', 0)}\n"
+                    f"**Text Backups:** {stats.get('total_text_transcripts', 0)}\n"
+                    f"**Storage Used:** {stats.get('storage_used', 'Unknown')}"
+                ),
+                inline=True
+            )
+            
+            embed.add_field(
+                name="⏰ Recent Activity",
+                value=(
+                    f"**Last Generated:** {stats.get('last_generated', 'Never')[:19] if stats.get('last_generated') else 'Never'}\n"
+                    f"**System Status:** ✅ Operational\n"
+                    f"**HTML Generator:** ✅ Active"
+                ),
+                inline=True
+            )
+            
+            embed.add_field(
+                name="🔧 Maintenance",
+                value=(
+                    "Use `/cleanup_transcripts` to clean old files\n"
+                    "HTML transcripts provide the best experience\n"
+                    "Text backups ensure data preservation"
+                ),
+                inline=False
+            )
+            
+            embed.set_footer(
+                text="fakepixle giveaways • Enhanced Transcript System",
+                icon_url=interaction.guild.icon.url if interaction.guild.icon else None
+            )
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Error in transcript_stats command: {e}")
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="❌ Error",
+                    description="Failed to retrieve transcript statistics.",
+                    color=discord.Color.red()
+                ),
+                ephemeral=True
+            )
+
+    @app_commands.command(name="cleanup_transcripts")
+    @app_commands.describe(days="Number of days to keep transcripts (default: 30)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def cleanup_transcripts(self, interaction: discord.Interaction, days: int = 30):
+        """Clean up old transcript files (Admin only)"""
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            if days < 1:
+                await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="❌ Invalid Input",
+                        description="Days must be at least 1.",
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
+                )
+                return
+            
+            # Cleanup old transcripts
+            deleted_count = await interaction.client.transcript_manager.cleanup_old_transcripts(days)
+            
+            embed = discord.Embed(
+                title="🧹 Transcript Cleanup Complete",
+                description=f"Successfully cleaned up old transcript files",
+                color=discord.Color.green(),
+                timestamp=datetime.utcnow()
+            )
+            
+            embed.add_field(
+                name="📊 Cleanup Results",
+                value=(
+                    f"**Files Deleted:** {deleted_count}\n"
+                    f"**Retention Period:** {days} days\n"
+                    f"**Status:** ✅ Complete"
+                ),
+                inline=False
+            )
+            
+            embed.set_footer(
+                text="fakepixle giveaways • Transcript Maintenance",
+                icon_url=interaction.guild.icon.url if interaction.guild.icon else None
+            )
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            logger.info(f"Transcript cleanup completed by {interaction.user.name}: {deleted_count} files deleted")
+            
+        except Exception as e:
+            logger.error(f"Error in cleanup_transcripts command: {e}")
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="❌ Error",
+                    description="Failed to cleanup transcript files.",
+                    color=discord.Color.red()
+                ),
+                ephemeral=True
+            )
 
 async def setup(bot):
     await bot.add_cog(AdminCommands(bot))
