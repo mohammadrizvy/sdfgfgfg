@@ -181,3 +181,11 @@ class DatabaseManager:
         except PyMongoError as e:
             logger.error(f"Error cleaning up tickets: {e}")
             return 0
+
+    async def get_all_open_tickets(self) -> List[Dict[str, Any]]:
+        """Get all tickets that are currently open"""
+        try:
+            return await self.tickets.find({"status": {"$ne": "closed"}}).to_list(None)
+        except PyMongoError as e:
+            logger.error(f"Error getting all open tickets: {e}")
+            return []

@@ -25,7 +25,6 @@ class TicketCategorySelect(discord.ui.Select):
                 description="Master dungeon completion",
                 emoji="👑"
             ),
-            
         ]
         super().__init__(
             placeholder="Select a service...",
@@ -45,7 +44,7 @@ class TicketCategorySelect(discord.ui.Select):
             elif selected_category == "Slayer Carry":
                 modal = SlayerCarryModal(self.bot)
             else:
-                modal = CarryRequestModal(self.bot)
+                modal = CarryRequestModal(self.bot, selected_category)
 
             await interaction.response.send_modal(modal)
 
@@ -64,6 +63,7 @@ class StaffApplicationModal(discord.ui.Modal):
     def __init__(self, bot):
         super().__init__(title="Staff Application")
         self.bot = bot
+        
         self.in_game_name = discord.ui.TextInput(
             label="In-Game Name",
             placeholder="Your in-game username",
@@ -95,14 +95,8 @@ class StaffApplicationModal(discord.ui.Modal):
             style=discord.TextStyle.paragraph,
             max_length=1000
         )
-        self.additional_info = discord.ui.TextInput(
-            label="Additional Information",
-            placeholder="Anything else you'd like to share",
-            required=False,
-            style=discord.TextStyle.paragraph,
-            max_length=1000
-        )
-        for field in [self.in_game_name, self.name, self.age, self.availability, self.experience, self.additional_info]:
+        
+        for field in [self.in_game_name, self.name, self.age, self.availability, self.experience]:
             self.add_item(field)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -122,13 +116,12 @@ class StaffApplicationModal(discord.ui.Modal):
                 f"**Name:** {self.name.value}\n"
                 f"**Age:** {self.age.value}\n"
                 f"**Country and Available Hours:** {self.availability.value}\n"
-                f"**Previous Experience:** {self.experience.value}\n"
-                f"**Additional Information:** {self.additional_info.value or 'None provided'}"
+                f"**Previous Experience:** {self.experience.value}"
             )
 
             ticket_commands = self.bot.get_cog('TicketCommands')
             if ticket_commands:
-                await interaction.response.send_message(storage.get_confirmation_message(), ephemeral=True)
+                await interaction.response.send_message("✅ Your application has been submitted!", ephemeral=True)
                 await ticket_commands.create_ticket_channel(interaction, "Staff Applications", application_details)
             else:
                 logger.error("TicketCommands cog not found")
@@ -144,16 +137,12 @@ class StaffApplicationModal(discord.ui.Modal):
                     "An error occurred while creating the application.",
                     ephemeral=True
                 )
-            else:
-                await interaction.followup.send(
-                    "An error occurred while creating the application.",
-                    ephemeral=True
-                )
 
 class SlayerCarryModal(discord.ui.Modal):
     def __init__(self, bot):
         super().__init__(title="Slayer Carry Request")
         self.bot = bot
+        
         self.in_game_name = discord.ui.TextInput(
             label="In-Game Name",
             placeholder="Your in-game username",
@@ -178,37 +167,23 @@ class SlayerCarryModal(discord.ui.Modal):
             required=True,
             max_length=5
         )
+        
         for field in [self.in_game_name, self.slayer_type, self.tier, self.carries]:
             self.add_item(field)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            # Validate tier format
-            if not self.tier.value.upper().startswith('T') or not self.tier.value[1:].isdigit():
-                await interaction.response.send_message(
-                    "Invalid tier format. Please use T1, T2, T3, T4, or T5.",
-                    ephemeral=True
-                )
-                return
-
-            # Validate carries is a number
-            if not self.carries.value.isdigit():
-                await interaction.response.send_message(
-                    "Number of carries must be a positive number.",
-                    ephemeral=True
-                )
-                return
-
+            # No validation needed as per user request
             carry_details = (
                 f"**In-Game Name:** {self.in_game_name.value}\n"
                 f"**Slayer Type:** {self.slayer_type.value}\n"
-                f"**Tier:** {self.tier.value.upper()}\n"
+                f"**Tier:** {self.tier.value}\n"
                 f"**Number of Carries:** {self.carries.value}"
             )
 
             ticket_commands = self.bot.get_cog('TicketCommands')
             if ticket_commands:
-                await interaction.response.send_message(storage.get_confirmation_message(), ephemeral=True)
+                await interaction.response.send_message("✅ Your slayer carry request has been submitted!", ephemeral=True)
                 await ticket_commands.create_ticket_channel(interaction, "Slayer Carry", carry_details)
             else:
                 logger.error("TicketCommands cog not found")
@@ -225,9 +200,11 @@ class SlayerCarryModal(discord.ui.Modal):
             )
 
 class CarryRequestModal(discord.ui.Modal):
-    def __init__(self, bot):
+    def __init__(self, bot, category):
         super().__init__(title="Carry Request")
         self.bot = bot
+        self.category = category
+        
         self.in_game_name = discord.ui.TextInput(
             label="In-Game Name",
             placeholder="Your in-game username",
@@ -252,6 +229,7 @@ class CarryRequestModal(discord.ui.Modal):
             required=True,
             max_length=3
         )
+        
         for field in [self.in_game_name, self.floor, self.completion, self.carries]:
             self.add_item(field)
 
@@ -262,49 +240,7 @@ class CarryRequestModal(discord.ui.Modal):
             completion = self.completion.value.upper()
             carries = self.carries.value
 
-            # Validate floor format
-            if not floor.startswith('F') or not floor[1:].isdigit() or int(floor[1:]) < 1 or int(floor[1:]) > 7:
-                await interaction.response.send_message(
-                    "Invalid floor format. Please use F1, F2, F3, F4, F5, F6, or F7.",
-                    ephemeral=True
-                )
-                return
-
-            # Validate completion type
-            if completion not in ['S', 'S+']:
-                await interaction.response.send_message(
-                    "Invalid completion type. Please specify either S or S+.",
-                    ephemeral=True
-                )
-                return
-
-            # Validate carries is a number and within limits
-            if not carries.isdigit():
-                await interaction.response.send_message(
-                    "Number of carries must be a positive number.",
-                    ephemeral=True
-                )
-                return
-
-            # Check if it's a master floor (F6 or F7)
-            is_master_floor = floor in ['F6', 'F7']
-            
-            # Validate carries limit based on floor type
-            carries_num = int(carries)
-            if is_master_floor:
-                if carries_num > 3:
-                    await interaction.response.send_message(
-                        "For master floors (F6, F7), the maximum number of carries is 3.",
-                        ephemeral=True
-                    )
-                    return
-            elif carries_num > 10:  # Regular floors can have more carries
-                await interaction.response.send_message(
-                    "The maximum number of carries for regular floors is 10.",
-                    ephemeral=True
-                )
-                return
-
+            # No validation needed as per user request
             carry_details = (
                 f"**In-Game Name:** {in_game_name}\n"
                 f"**Floor:** {floor}\n"
@@ -314,8 +250,8 @@ class CarryRequestModal(discord.ui.Modal):
 
             ticket_commands = self.bot.get_cog('TicketCommands')
             if ticket_commands:
-                await interaction.response.send_message(storage.get_confirmation_message(), ephemeral=True)
-                await ticket_commands.create_ticket_channel(interaction, "Carry Request", carry_details)
+                await interaction.response.send_message("✅ Your carry request has been submitted!", ephemeral=True)
+                await ticket_commands.create_ticket_channel(interaction, self.category, carry_details)
             else:
                 logger.error("TicketCommands cog not found")
                 await interaction.response.send_message(
@@ -335,6 +271,7 @@ class AdminCommands(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="ticket_setup")
+    @app_commands.describe(channel="The channel where the ticket panel will be created")
     @app_commands.checks.has_permissions(administrator=True)
     async def ticket_setup(self, interaction: discord.Interaction, channel: discord.TextChannel):
         """Set up the ticket system in a specific channel"""
@@ -374,14 +311,13 @@ class AdminCommands(commands.Cog):
             # Add footer
             embed.set_footer(
                 text="FakePixel Giveaways • Carry Services",
-                icon_url=None
             )
 
             # Add thumbnail
             embed.set_thumbnail(url='https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo')
 
             # Create view with category select
-            view = discord.ui.View(timeout=86400)  # Set 24 hour timeout for the view
+            view = discord.ui.View(timeout=None)  # Persistent view
             view.add_item(TicketCategorySelect(self.bot))
 
             # Send the embed with the view
@@ -408,6 +344,7 @@ class AdminCommands(commands.Cog):
             )
 
     @app_commands.command(name="add_user")
+    @app_commands.describe(user="The user to add", role="The role to assign (staff, carrier, moderator)")
     @app_commands.checks.has_permissions(administrator=True)
     async def add_user(self, interaction: discord.Interaction, user: discord.Member, role: str):
         """Add a user to the system with a specific role"""

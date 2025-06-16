@@ -5,7 +5,6 @@ from discord import app_commands
 import logging
 from datetime import datetime
 from . import storage
-from .ticket_closing import TicketClosingSystem
 
 logger = logging.getLogger('discord')
 
@@ -17,11 +16,15 @@ class TicketControlsView(discord.ui.View):
         self.ticket_number = ticket_number
         self.message = None
         
+        # Get initial claim status for persistent view setup
+        ticket_data = storage.get_ticket_log(self.ticket_number)
+        initial_claimer = ticket_data.get('claimed_by') if ticket_data else "Unclaimed"
+
         # Add claim/unclaim button
         self.claim_button = discord.ui.Button(
-            label="Claim Ticket",
-            style=discord.ButtonStyle.success,
-            emoji="🙋",
+            label="Claim Ticket" if initial_claimer == "Unclaimed" else "Unclaim Ticket",
+            style=discord.ButtonStyle.success if initial_claimer == "Unclaimed" else discord.ButtonStyle.danger,
+            emoji="🙋" if initial_claimer == "Unclaimed" else "❌",
             custom_id=f"claim_{ticket_number}",
             row=0
         )
@@ -63,13 +66,14 @@ class TicketControlsView(discord.ui.View):
             carrier_roles = {
                 "Slayer Carry": "Slayer Carrier",
                 "Normal Dungeon Carry": "Normal Dungeon Carrier",
-                "Master Dungeon Carry": "Master Dungeon Carrier"
+                "Master Dungeon Carry": "Master Dungeon Carrier",
+                "Staff Applications": "Admin"
             }
             
             required_role = carrier_roles.get(category)
-            if not required_role or not any(role.name == required_role for role in interaction.user.roles):
+            if not required_role or not any(role.name in [required_role, "Admin", "Staff"] for role in interaction.user.roles):
                 await interaction.response.send_message(
-                    "❌ Only carrier staff can claim tickets for this category.", 
+                    "❌ Only authorized staff can claim tickets for this category.", 
                     ephemeral=True
                 )
                 return
@@ -145,6 +149,7 @@ class TicketControlsView(discord.ui.View):
             )
 
     async def call_help_callback(self, interaction: discord.Interaction):
+        """Handle call for help button"""
         try:
             # Get ticket data
             ticket_data = storage.get_ticket_log(self.ticket_number)
@@ -167,14 +172,8 @@ class TicketControlsView(discord.ui.View):
                 )
                 return
 
-            # Get the category from the embed
-            embed = interaction.message.embeds[0]
-            category = None
-            for field in embed.fields:
-                if "Ticket Information" in field.name:
-                    category = field.value.split('**Category:** ')[1].split('\n')[0]
-                    break
-
+            # Get the category from ticket data
+            category = ticket_data.get('category')
             if not category:
                 await interaction.response.send_message("❌ Could not determine ticket category.", ephemeral=True)
                 return
@@ -233,19 +232,6 @@ class TicketControlsView(discord.ui.View):
                 embed=ping_embed
             )
             
-            # Update the ticket embed to remove the status
-            if self.message and self.message.embeds:
-                embed = self.message.embeds[0]
-                for i, field in enumerate(embed.fields):
-                    if "Ticket Information" in field.name:
-                        # Remove the status line from the field value
-                        field_value = field.value.split('\n')
-                        field_value = [line for line in field_value if "Status:" not in line]
-                        field_value = '\n'.join(field_value)
-                        embed.set_field_at(i, name=field.name, value=field_value, inline=field.inline)
-                        break
-                await self.message.edit(embed=embed)
-            
             await interaction.response.send_message(
                 "✅ Help request sent! A carrier will assist you shortly.",
                 ephemeral=True
@@ -271,12 +257,6 @@ class TicketControlsView(discord.ui.View):
                     ),
                     ephemeral=True
                 )
-                return
-
-            # Get ticket data
-            ticket_data = storage.get_ticket_log(self.ticket_number)
-            if not ticket_data:
-                await interaction.response.send_message("❌ Ticket not found.", ephemeral=True)
                 return
 
             # Show the close reason modal
@@ -308,15 +288,30 @@ class TicketControlsView(discord.ui.View):
             embed = self.message.embeds[0] if self.message.embeds else None
             if not embed:
                 return
-                
+            
+            # Fetch the latest ticket data from the database
+            latest_ticket_data = await storage.get_ticket_log(self.ticket_number)
+            if not latest_ticket_data:
+                logger.warning(f"Could not fetch latest ticket data for {self.ticket_number} in update_ticket_embed.")
+                return
+
+            # Use the claimed_by status from the latest ticket data
+            current_claimed_by = latest_ticket_data.get('claimed_by', 'Unclaimed')
+            
             # Find and update the ticket information field
             for i, field in enumerate(embed.fields):
                 if "Ticket Information" in field.name:
+                    # Get the category from the existing field
+                    field_lines = field.value.split('\n')
+                    category_line = next((line for line in field_lines if "Category:" in line), "**Category:** Unknown")
+                    category = category_line.split('**Category:** ')[1] if '**Category:** ' in category_line else "Unknown"
+                    
                     # Update the field value with new claim status
+                    status_text = f"✅ Claimed by {current_claimed_by}" if current_claimed_by != "Unclaimed" else "🔄 Awaiting Response"
                     field_value = (
                         f"**Ticket #:** {self.ticket_number}\n"
-                        f"**Category:** {field.value.split('**Category:** ')[1].split('\n')[0]}\n"
-                        f"**Status:** {claimed_by if claimed_by != 'Unclaimed' else '🔄 Awaiting Response'}"
+                        f"**Category:** {category}\n"
+                        f"**Status:** {status_text}"
                     )
                     embed.set_field_at(i, name=field.name, value=field_value, inline=field.inline)
                     break
@@ -324,106 +319,8 @@ class TicketControlsView(discord.ui.View):
             # Update the message with new embed
             await self.message.edit(embed=embed)
             
-            # Ensure footer icon is not set during updates
-            embed.set_footer(icon_url=None)
-            
         except Exception as e:
             logger.error(f"Error updating ticket embed: {e}")
-
-    async def send_feedback_request(self, user: discord.Member, ticket_number: str):
-        """Send feedback request to user via DM"""
-        try:
-            # Check if feedback already exists
-            existing_feedback = storage.get_feedback(ticket_number)
-            if existing_feedback:
-                logger.info(f"Feedback already exists for ticket {ticket_number}")
-                return
-
-            # Get ticket data
-            ticket_data = storage.get_ticket_log(ticket_number)
-            if not ticket_data:
-                logger.error(f"Could not find ticket data for {ticket_number}")
-                return
-
-            # Create feedback embed
-            embed = discord.Embed(
-                title="⭐ Rate Your Support Experience",
-                description=(
-                    f"Hi {user.name}! Your ticket **#{ticket_number}** has been closed.\n\n"
-                    f"We'd love to hear about your experience with our support team. "
-                    f"Your feedback helps us improve our services!\n\n"
-                    f"**Ticket Details:**\n"
-                    f"• **Ticket Number:** #{ticket_number}\n"
-                    f"• **Category:** {ticket_data.get('category', 'Unknown')}\n\n"
-                    f"🌟 **How to Rate**\n"
-                    f"Click the star buttons below to rate your experience:\n"
-                    f"⭐ = Poor | ⭐⭐⭐⭐⭐ = Excellent"
-                ),
-                color=discord.Color.gold(),
-                timestamp=datetime.utcnow()
-            )
-
-            # Add footer
-            embed.set_footer(
-                text=f"FakePixel Giveaways • Ticket #{ticket_number} • This feedback form expires in 24 hours",
-                icon_url=user.guild.icon.url if user.guild.icon else None
-            )
-
-            # Create view with star rating buttons
-            view = StarRatingView(ticket_number, user.id, timeout=86400)  # 24 hours
-            
-            # Send DM with feedback request
-            try:
-                await user.send(embed=embed, view=view)
-                logger.info(f"Feedback request sent to user {user.name} for ticket {ticket_number}")
-            except discord.Forbidden:
-                logger.warning(f"Could not send feedback request to user {user.name} - DMs are closed")
-
-        except Exception as e:
-            logger.error(f"Error in send_feedback_request: {e}")
-
-    async def close_ticket(self, channel: discord.TextChannel, ticket_number: str, closer: discord.Member) -> bool:
-        """Close a ticket and handle all related tasks"""
-        try:
-            # Initialize closing system
-            closing_system = TicketClosingSystem(self.bot)
-            
-            # Create a mock interaction for the closing workflow
-            class MockInteraction:
-                def __init__(self, channel, user, guild):
-                    self.channel = channel
-                    self.user = user
-                    self.guild = guild
-                    self.response = MockResponse()
-                    self.followup = MockResponse()
-
-            class MockResponse:
-                async def send_message(self, *args, **kwargs):
-                    pass
-                async def defer(self, *args, **kwargs):
-                    pass
-
-            mock_interaction = MockInteraction(channel, closer, channel.guild)
-            
-            # Run closing workflow
-            success = await closing_system.close_ticket_workflow(
-                interaction=mock_interaction,
-                ticket_number=ticket_number
-            )
-
-            if success:
-                # Delay before deleting the channel
-                await asyncio.sleep(10)
-                try:
-                    await channel.delete()
-                except discord.NotFound:
-                    pass  # Channel already deleted
-                return True
-            return False
-
-        except Exception as e:
-            logger.error(f"Error in close_ticket: {e}")
-            return False
 
 class StarRatingView(discord.ui.View):
     """Star rating system for ticket feedback"""
@@ -435,15 +332,13 @@ class StarRatingView(discord.ui.View):
     
     def add_star_buttons(self):
         """Add star rating buttons"""
-        for rating in range(1, 6):
+        for i in range(1, 6):
             button = discord.ui.Button(
-                label=f"{rating} Star{'s' if rating > 1 else ''}",
-                custom_id=f"star_{rating}",
-                emoji="⭐",
-                style=discord.ButtonStyle.primary if rating >= 4 else discord.ButtonStyle.secondary,
-                row=0 if rating <= 3 else 1
+                label=f"{'⭐' * i} {i} Star{'s' if i > 1 else ''}",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"star_rating_{self.ticket_number}_{i}"
             )
-            button.callback = self.create_star_callback(rating)
+            button.callback = self.create_star_callback(i)
             self.add_item(button)
     
     def create_star_callback(self, rating: int):
@@ -480,7 +375,6 @@ class FeedbackModal(discord.ui.Modal, title="✨ Share Your Experience"):
         self.rating = rating
         self.user = user
         
-        # Customize title based on rating
         if rating >= 4:
             self.title = "✨ Tell us what went well!"
         elif rating >= 3:
@@ -508,46 +402,9 @@ class FeedbackModal(discord.ui.Modal, title="✨ Share Your Experience"):
             max_length=1000
         )
         self.add_item(self.suggestions)
-        
-        # Add response time rating
-        self.response_time = discord.ui.TextInput(
-            label="Response Time Rating (1-5)",
-            placeholder="How quickly did we respond to your ticket?",
-            required=True,
-            max_length=1,
-            min_length=1
-        )
-        self.add_item(self.response_time)
-        
-        # Add staff helpfulness rating
-        self.staff_helpfulness = discord.ui.TextInput(
-            label="Staff Helpfulness Rating (1-5)",
-            placeholder="How helpful was our support staff?",
-            required=True,
-            max_length=1,
-            min_length=1
-        )
-        self.add_item(self.staff_helpfulness)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            # Validate ratings
-            try:
-                response_rating = int(self.response_time.value)
-                helpfulness_rating = int(self.staff_helpfulness.value)
-                if not (1 <= response_rating <= 5 and 1 <= helpfulness_rating <= 5):
-                    raise ValueError("Ratings must be between 1 and 5")
-            except ValueError:
-                await interaction.response.send_message(
-                    embed=discord.Embed(
-                        title="❌ Invalid Rating",
-                        description="Please provide valid ratings (1-5) for response time and staff helpfulness.",
-                        color=discord.Color.red()
-                    ),
-                    ephemeral=True
-                )
-                return
-
             # Store feedback
             logger.info(f"Storing feedback for ticket {self.ticket_number} from user {self.user.name}")
             
@@ -556,11 +413,7 @@ class FeedbackModal(discord.ui.Modal, title="✨ Share Your Experience"):
                 user_id=str(self.user.id),
                 rating=self.rating,
                 feedback=self.feedback.value,
-                suggestions=self.suggestions.value,
-                carrier_ratings={
-                    'response_time': response_rating,
-                    'staff_helpfulness': helpfulness_rating
-                }
+                suggestions=self.suggestions.value or ""
             )
             
             if not stored:
@@ -577,46 +430,24 @@ class FeedbackModal(discord.ui.Modal, title="✨ Share Your Experience"):
 
             # Get ticket data for guild information
             ticket_data = storage.get_ticket_log(self.ticket_number)
-            if not ticket_data:
-                logger.error(f"Could not find ticket data for {self.ticket_number}")
-                await interaction.response.send_message(
-                    embed=discord.Embed(
-                        title="⚠️ Warning",
-                        description="Your feedback was saved, but we couldn't find the ticket details.",
-                        color=discord.Color.orange()
-                    ),
-                    ephemeral=True
-                )
-                return
-
+            
             # Get the guild and feedback channel
             guild = interaction.guild
-            if not guild:
+            if not guild and ticket_data:
                 guild_id = ticket_data.get('guild_id')
                 if guild_id:
                     guild = interaction.client.get_guild(int(guild_id))
-                
-            if not guild:
-                logger.error(f"Could not determine guild for ticket {self.ticket_number}")
-                await interaction.response.send_message(
-                    embed=discord.Embed(
-                        title="✅ Feedback Saved",
-                        description="Thank you for your feedback! It has been saved successfully.",
-                        color=discord.Color.green()
-                    ),
-                    ephemeral=True
-                )
-                return
 
-            # Find feedback channel
-            feedback_channel = discord.utils.get(guild.text_channels, name='feedback-logs')
-            
-            if feedback_channel:
-                # Create enhanced feedback embed for staff
-                await self.send_feedback_to_channel(feedback_channel, ticket_data)
-                logger.info(f"Feedback sent to channel {feedback_channel.name} for ticket {self.ticket_number}")
-            else:
-                logger.warning(f"Feedback channel not found in guild {guild.name}")
+            # Find feedback channel and send feedback
+            if guild:
+                feedback_channel = discord.utils.get(guild.text_channels, name='feedback-logs')
+                
+                if feedback_channel:
+                    # Create enhanced feedback embed for staff
+                    await self.send_feedback_to_channel(feedback_channel, ticket_data or {})
+                    logger.info(f"Feedback sent to channel {feedback_channel.name} for ticket {self.ticket_number}")
+                else:
+                    logger.warning(f"Feedback channel not found in guild {guild.name}")
 
             # Send thank you message to user
             await self.send_thank_you_message(interaction)
@@ -659,23 +490,15 @@ class FeedbackModal(discord.ui.Modal, title="✨ Share Your Experience"):
                 value=(
                     f"**Category:** {ticket_data.get('category', 'Unknown')}\n"
                     f"**Customer:** {self.user.mention}\n"
-                    f"**Claimed By:** {ticket_data.get('claimed_by', 'Unclaimed')}\n"
-                    f"**Created:** <t:{int(datetime.fromisoformat(ticket_data.get('created_at', datetime.now().isoformat())).timestamp())}:R>"
+                    f"**Claimed By:** {ticket_data.get('claimed_by', 'Unclaimed')}"
                 ),
                 inline=True
             )
             
-            # Add ratings breakdown
-            response_rating = int(self.response_time.value)
-            helpfulness_rating = int(self.staff_helpfulness.value)
-            
+            # Add rating info
             feedback_embed.add_field(
-                name="📊 Detailed Ratings",
-                value=(
-                    f"**Overall:** {'⭐' * self.rating} ({self.rating}/5)\n"
-                    f"**Response Time:** {'⭐' * response_rating} ({response_rating}/5)\n"
-                    f"**Staff Helpfulness:** {'⭐' * helpfulness_rating} ({helpfulness_rating}/5)"
-                ),
+                name="📊 Rating",
+                value=f"{'⭐' * self.rating} ({self.rating}/5)",
                 inline=True
             )
             
@@ -735,11 +558,7 @@ class FeedbackModal(discord.ui.Modal, title="✨ Share Your Experience"):
             # Add feedback summary
             thank_you_embed.add_field(
                 name="📋 Your Feedback Summary",
-                value=(
-                    f"**Overall Rating:** {'⭐' * self.rating} ({self.rating}/5)\n"
-                    f"**Response Time:** {'⭐' * int(self.response_time.value)} ({self.response_time.value}/5)\n"
-                    f"**Staff Helpfulness:** {'⭐' * int(self.staff_helpfulness.value)} ({self.staff_helpfulness.value}/5)"
-                ),
+                value=f"**Rating:** {'⭐' * self.rating} ({self.rating}/5)",
                 inline=False
             )
             
@@ -784,181 +603,6 @@ class FeedbackModal(discord.ui.Modal, title="✨ Share Your Experience"):
             except:
                 pass
 
-class FeedbackDisplayView(discord.ui.View):
-    """View to display submitted feedback with management options"""
-    
-    def __init__(self, ticket_number: str, rating: int):
-        super().__init__(timeout=None)
-        self.ticket_number = ticket_number
-        self.rating = rating
-        
-        # Add disabled star buttons to show rating
-        for i in range(1, 6):
-            button = discord.ui.Button(
-                style=discord.ButtonStyle.success if i <= rating else discord.ButtonStyle.secondary,
-                emoji="⭐",
-                label=str(i),
-                disabled=True,
-                custom_id=f"star_display_{i}",
-                row=0
-            )
-            self.add_item(button)
-        
-        # Add management buttons for staff
-        self.add_item(self.create_respond_button())
-        self.add_item(self.create_archive_button())
-    
-    def create_respond_button(self):
-        """Create button for staff to respond to feedback"""
-        button = discord.ui.Button(
-            label="Respond to Customer",
-            style=discord.ButtonStyle.primary,
-            emoji="💬",
-            custom_id=f"respond_{self.ticket_number}",
-            row=1
-        )
-        
-        async def respond_callback(interaction: discord.Interaction):
-            # Check if user has staff permissions
-            if not any(role.name in ["Staff", "Admin", "Moderator", "Support"] for role in interaction.user.roles):
-                await interaction.response.send_message(
-                    "❌ You don't have permission to respond to feedback.",
-                    ephemeral=True
-                )
-                return
-            
-            modal = FeedbackResponseModal(self.ticket_number)
-            await interaction.response.send_modal(modal)
-        
-        button.callback = respond_callback
-        return button
-    
-    def create_archive_button(self):
-        """Create button to archive feedback"""
-        button = discord.ui.Button(
-            label="Archive Feedback",
-            style=discord.ButtonStyle.secondary,
-            emoji="📁",
-            custom_id=f"archive_{self.ticket_number}",
-            row=1
-        )
-        
-        async def archive_callback(interaction: discord.Interaction):
-            # Check if user has admin permissions
-            if not any(role.name in ["Admin", "Moderator"] for role in interaction.user.roles):
-                await interaction.response.send_message(
-                    "❌ You don't have permission to archive feedback.",
-                    ephemeral=True
-                )
-                return
-            
-            # Disable all buttons
-            for item in self.children:
-                if not item.label or "star" not in item.custom_id:
-                    item.disabled = True
-            
-            embed = discord.Embed(
-                title="📁 Feedback Archived",
-                description=f"Feedback for ticket #{self.ticket_number} has been archived by {interaction.user.mention}",
-                color=discord.Color.greyple(),
-                timestamp=datetime.utcnow()
-            )
-            
-            await interaction.response.edit_message(embed=embed, view=self)
-        
-        button.callback = archive_callback
-        return button
-
-class FeedbackResponseModal(discord.ui.Modal, title="💬 Respond to Customer Feedback"):
-    def __init__(self, ticket_number: str):
-        super().__init__()
-        self.ticket_number = ticket_number
-        
-        self.response = discord.ui.TextInput(
-            label="Your Response to the Customer",
-            placeholder="Thank the customer and address their feedback...",
-            style=discord.TextStyle.paragraph,
-            required=True,
-            max_length=1000,
-            min_length=10
-        )
-        self.add_item(self.response)
-        
-        self.action_taken = discord.ui.TextInput(
-            label="Actions Taken (Optional)",
-            placeholder="What specific actions have been taken based on this feedback?",
-            style=discord.TextStyle.paragraph,
-            required=False,
-            max_length=500
-        )
-        self.add_item(self.action_taken)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            # Get the original feedback
-            feedback_data = storage.get_feedback(self.ticket_number)
-            if not feedback_data:
-                await interaction.response.send_message(
-                    "❌ Could not find the original feedback.",
-                    ephemeral=True
-                )
-                return
-            
-            # Get the customer
-            customer_id = feedback_data.get('user_id')
-            if customer_id:
-                try:
-                    customer = interaction.guild.get_member(int(customer_id))
-                    if customer:
-                        # Send response to customer
-                        customer_embed = discord.Embed(
-                            title="💬 Response to Your Feedback",
-                            description=f"Thank you for your feedback on ticket #{self.ticket_number}!",
-                            color=discord.Color.blue(),
-                            timestamp=datetime.utcnow()
-                        )
-                        
-                        customer_embed.add_field(
-                            name="📝 Staff Response",
-                            value=self.response.value,
-                            inline=False
-                        )
-                        
-                        if self.action_taken.value:
-                            customer_embed.add_field(
-                                name="🔧 Actions Taken",
-                                value=self.action_taken.value,
-                                inline=False
-                            )
-                        
-                        customer_embed.set_footer(
-                            text=f"Response from {interaction.user.display_name}",
-                            icon_url=interaction.user.avatar.url if interaction.user.avatar else None
-                        )
-                        
-                        try:
-                            await customer.send(embed=customer_embed)
-                            status_msg = "✅ Response sent to customer successfully!"
-                        except discord.Forbidden:
-                            status_msg = "⚠️ Response saved, but couldn't send DM to customer (DMs disabled)."
-                        
-                    else:
-                        status_msg = "⚠️ Customer not found in server."
-                        
-                except ValueError:
-                    status_msg = "⚠️ Invalid customer ID."
-            else:
-                status_msg = "⚠️ Customer ID not found in feedback data."
-            
-            await interaction.response.send_message(status_msg, ephemeral=True)
-            
-        except Exception as e:
-            logger.error(f"Error submitting feedback response: {e}")
-            await interaction.response.send_message(
-                "❌ An error occurred while sending your response.",
-                ephemeral=True
-            )
-            
 class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
     def __init__(self, ticket_number: str):
         super().__init__()
@@ -969,7 +613,8 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
             placeholder="Please provide a reason for closing this ticket...",
             style=discord.TextStyle.paragraph,
             required=True,
-            min_length=10
+            min_length=5,
+            max_length=500
         )
         self.add_item(self.reason)
 
@@ -985,38 +630,111 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
             await interaction.response.defer(ephemeral=True)
 
             try:
-                # Close the ticket with the provided reason
-                closing_system = TicketClosingSystem(interaction.client)
-                success = await closing_system.close_ticket_workflow(
-                    interaction=interaction,
-                    ticket_number=self.ticket_number,
-                    close_reason=self.reason.value
+                # Update ticket resolution time
+                storage.update_ticket_times(self.ticket_number, "resolved", str(interaction.user.id))
+                
+                # Close the ticket in storage
+                storage.close_ticket(self.ticket_number, self.reason.value)
+                
+                # Send closing message to the channel
+                await interaction.channel.send(
+                    embed=discord.Embed(
+                        title="🔒 Ticket Closing",
+                        description=(
+                            f"This ticket will be deleted in 10 seconds...\n\n"
+                            f"**Close Reason:** {self.reason.value}\n"
+                            f"**Closed by:** {interaction.user.mention}"
+                        ),
+                        color=discord.Color.blue()
+                    )
                 )
                 
-                if success:
-                    await interaction.followup.send(
-                        embed=discord.Embed(
-                            title="✅ Ticket Closed",
-                            description=f"Ticket #{self.ticket_number} has been successfully closed and archived.",
-                            color=discord.Color.green()
-                        ),
-                        ephemeral=True
-                    )
-                else:
-                    await interaction.followup.send(
-                        embed=discord.Embed(
-                            title="❌ Error",
-                            description="Failed to close the ticket. Please try again or contact an administrator.",
-                            color=discord.Color.red()
-                        ),
-                        ephemeral=True
-                    )
-            except Exception as e:
-                logger.error(f"Error in close ticket workflow: {e}")
+                # Send transcript to logs channel if it exists
+                transcript_channel = discord.utils.get(interaction.guild.channels, name="ticket-transcripts")
+                if transcript_channel:
+                    try:
+                        # Get all messages from the ticket channel
+                        messages = []
+                        async for msg in interaction.channel.history(limit=None, oldest_first=True):
+                            messages.append(msg)
+                        
+                        # Create transcript content
+                        transcript_content = self.format_transcript(messages, ticket_data, interaction.user)
+                        
+                        # Save transcript to file
+                        import os
+                        os.makedirs('transcripts', exist_ok=True)
+                        transcript_file = f"transcripts/ticket_{self.ticket_number}.txt"
+                        
+                        with open(transcript_file, 'w', encoding='utf-8') as f:
+                            f.write(transcript_content)
+                        
+                        # Send transcript to channel
+                        with open(transcript_file, 'rb') as f:
+                            file = discord.File(f, filename=f"ticket_{self.ticket_number}_transcript.txt")
+                            
+                            transcript_embed = discord.Embed(
+                                title="📋 Ticket Transcript",
+                                description=f"Transcript for ticket #{self.ticket_number}",
+                                color=discord.Color.blue(),
+                                timestamp=datetime.utcnow()
+                            )
+                            transcript_embed.add_field(
+                                name="Ticket Information",
+                                value=(
+                                    f"**Category:** {ticket_data.get('category', 'Unknown')}\n"
+                                    f"**Creator:** <@{ticket_data.get('creator_id', 'Unknown')}>\n"
+                                    f"**Claimed By:** {ticket_data.get('claimed_by', 'Unclaimed')}\n"
+                                    f"**Closed By:** {interaction.user.mention}\n"
+                                    f"**Close Reason:** {self.reason.value}"
+                                ),
+                                inline=False
+                            )
+                            
+                            await transcript_channel.send(embed=transcript_embed, file=file)
+                        
+                    except Exception as transcript_error:
+                        logger.error(f"Error creating transcript: {transcript_error}")
+                
+                # Send feedback request to user
+                try:
+                    creator_id = ticket_data.get('creator_id') or ticket_data.get('user_id')
+                    if creator_id:
+                        creator = await interaction.guild.fetch_member(int(creator_id))
+                        if creator:
+                            view = StarRatingView(self.ticket_number, int(creator_id))
+                            
+                            feedback_embed = discord.Embed(
+                                title="⭐ Rate Your Experience",
+                                description=(
+                                    f"Hi {creator.name}! Your ticket **#{self.ticket_number}** has been closed.\n\n"
+                                    f"We'd love to hear about your experience with our support team!"
+                                ),
+                                color=discord.Color.gold()
+                            )
+                            
+                            try:
+                                await creator.send(embed=feedback_embed, view=view)
+                            except discord.Forbidden:
+                                logger.warning(f"Could not send feedback request to {creator.name} - DMs closed")
+                                
+                except Exception as feedback_error:
+                    logger.error(f"Error sending feedback request: {feedback_error}")
+                
+                # Wait before deleting the channel
+                await asyncio.sleep(10)
+                
+                # Delete the channel
+                await interaction.channel.delete()
+                
+                logger.info(f"Ticket {self.ticket_number} closed successfully by {interaction.user.name}")
+                
+            except Exception as close_error:
+                logger.error(f"Error in close ticket workflow: {close_error}")
                 await interaction.followup.send(
                     embed=discord.Embed(
                         title="❌ Error",
-                        description="An error occurred while trying to close the ticket.",
+                        description="An error occurred while closing the ticket.",
                         color=discord.Color.red()
                     ),
                     ephemeral=True
@@ -1034,4 +752,42 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
                     ephemeral=True
                 )
 
+    def format_transcript(self, messages: list, ticket_data: dict, closed_by: discord.Member) -> str:
+        """Format ticket messages into a readable transcript"""
+        lines = []
+        lines.append("=" * 70)
+        lines.append("FAKEPIXEL GIVEAWAYS - TICKET TRANSCRIPT")
+        lines.append("=" * 70)
+        lines.append(f"TICKET NUMBER: #{self.ticket_number}")
+        lines.append(f"CATEGORY: {ticket_data.get('category', 'Unknown')}")
+        lines.append(f"CREATOR: {ticket_data.get('creator_id', 'Unknown')}")
+        lines.append(f"CLAIMED BY: {ticket_data.get('claimed_by', 'Unclaimed')}")
+        lines.append(f"CLOSED BY: {closed_by.name}")
+        lines.append(f"CLOSE REASON: {self.reason.value}")
+        lines.append(f"GENERATED: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        lines.append("=" * 70)
+        lines.append("")
+        
+        for msg in messages:
+            try:
+                timestamp = msg.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')
+                author = msg.author.display_name if hasattr(msg.author, 'display_name') else str(msg.author)
+                content = msg.content or "*[attachment or embed]*"
+                
+                # Clean up content for transcript
+                content = content.replace('\n', ' ').strip()
+                if len(content) > 100:
+                    content = content[:97] + "..."
+                    
+                lines.append(f"[{timestamp}] {author}: {content}")
+            except Exception as e:
+                logger.error(f"Error formatting message for transcript: {e}")
+                continue
+        
+        lines.append("")
+        lines.append("=" * 70)
+        lines.append("END OF TRANSCRIPT")
+        lines.append("=" * 70)
+        
+        return "\n".join(lines)
             

@@ -1,15 +1,13 @@
 [project]
 name = "repl-nix-workspace"
 version = "0.1.0"
-description = "Add your description here"
+description = "Discord ticket bot for carry services"
 requires-python = ">=3.11"
 dependencies = [
     "discord-py>=2.0.0",
-    "trafilatura>=2.0.0",
-    "motor>=3.3.0",
-    "pymongo>=4.6.0",
     "python-dotenv>=1.0.0",
-    "aioredis>=2.0.0",
-    "aiocron>=1.8",
-    "orjson>=3.9.10"
 ]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
