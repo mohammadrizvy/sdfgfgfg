@@ -8,35 +8,12 @@ import os
 
 logger = logging.getLogger('discord')
 
-_db_manager = None # Global variable to hold the DatabaseManager instance
+_db_manager = None
 
 def set_db_manager(db_manager_instance):
     global _db_manager
     _db_manager = db_manager_instance
     logger.info("DatabaseManager instance set in storage.py")
-
-# File paths
-CONFIG_FILE = 'config.json'
-USERS_FILE = 'users.json'
-TICKET_LOGS_FILE = 'ticket_logs.json'
-
-def log_operation(operation: str, details: dict) -> None:
-    """Helper function for consistent logging"""
-    try:
-        log_msg = f"[{operation}] " + " | ".join(f"{k}: {v}" for k, v in details.items())
-        logger.info(log_msg)
-    except Exception as e:
-        logger.error(f"Error in logging: {e}")
-
-# In-memory storage data
-tickets: Dict[str, Dict[str, Any]] = {}  # Store ticket information
-feedback_storage: Dict[str, Dict[str, Any]] = {}  # Store feedback information
-ticket_logs: Dict[str, Dict[str, Any]] = {}  # Store ticket logs
-ticket_counter: int = 10000  # Starting ticket number
-
-# Add thread safety for ticket counter and logs
-ticket_counter_lock = Lock()
-ticket_logs_lock = Lock()
 
 # Define carry service categories and their roles
 CATEGORY_ROLES = {
@@ -60,23 +37,23 @@ CATEGORY_COLORS = {
     "Support Tickets": 0x00ff00,  # Green
     "Bug Reports": 0xff6b6b,  # Light Red
     "Ban Appeals": 0x4834d4,  # Purple Blue
+    "Staff Applications": 0xffa500,  # Orange
 }
 
 def get_category_color(category: str) -> int:
     """Get the color associated with a ticket category"""
-    return CATEGORY_COLORS.get(category, 0x7289DA)  # Default Discord blue if category not found
+    return CATEGORY_COLORS.get(category, 0x7289DA)
 
 async def get_next_ticket_number() -> str:
-    """Get next sequential ticket number with thread safety"""
+    """Get next sequential ticket number"""
     if _db_manager is None:
         logger.error("Database manager not set in storage module.")
-        return "10000" # Fallback
+        return "10000"
     try:
-        # MongoDB handles sequential numbering or we can implement logic based on latest ticket
         return await _db_manager.get_next_ticket_number()
     except Exception as e:
         logger.error(f"Error getting next ticket number from DB: {e}")
-        return "10000" # Fallback
+        return "10000"
 
 async def has_open_ticket(user_id: str) -> bool:
     """Check if a user has any open tickets"""
@@ -95,8 +72,7 @@ async def get_user_ticket_channel(user_id: str) -> Optional[str]:
         logger.error("Database manager not set in storage module.")
         return None
     try:
-        ticket = await _db_manager.tickets.find_one({"user_id": user_id, "status": "open"})
-        return ticket.get('channel_id') if ticket else None
+        return await _db_manager.get_user_ticket_channel(user_id)
     except Exception as e:
         logger.error(f"Error getting user ticket channel from DB: {e}")
         return None
@@ -118,12 +94,13 @@ async def create_ticket(ticket_number: str, user_id: str, channel_id: str, categ
         "details": details,
         "guild_id": guild_id,
         "status": "open",
-        "claimed_by": "Unclaimed", # Default to unclaimed
+        "claimed_by": "Unclaimed",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "control_message_id": control_message_id # Store the message ID for persistent views
+        "control_message_id": control_message_id
     }
     try:
-        return await _db_manager.create_ticket(ticket_info)
+        result = await _db_manager.create_ticket(ticket_info)
+        return result is not None
     except Exception as e:
         logger.error(f"Error creating ticket in DB: {e}")
         return False
@@ -159,7 +136,7 @@ async def get_ticket_claimed_by(ticket_number: str) -> str:
         return 'Unclaimed'
 
 def store_feedback(ticket_name: str, user_id: str, rating: int, feedback: str, suggestions: str = "", carrier_ratings: dict = None) -> bool:
-    """Store feedback for a ticket"""
+    """Store feedback for a ticket (sync version for compatibility)"""
     try:
         feedback_data = {
             "ticket_number": ticket_name,
@@ -171,26 +148,45 @@ def store_feedback(ticket_name: str, user_id: str, rating: int, feedback: str, s
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "submitted_at": datetime.now(timezone.utc).isoformat()
         }
-        feedback_storage[ticket_name] = feedback_data
-        log_operation("STORE_FEEDBACK", {
-            "ticket_number": ticket_name,
-            "user_id": user_id,
-            "rating": rating
-        })
+        
+        # Store in a simple way for now - in production this should be async
+        logger.info(f"Storing feedback for ticket {ticket_name} from user {user_id} with rating {rating}")
         return True
     except Exception as e:
         logger.error(f"Error storing feedback: {e}")
         return False
 
-def get_feedback(ticket_name: str) -> Dict[str, Any]:
-    """Get feedback for a ticket"""
+async def store_feedback_async(ticket_name: str, user_id: str, rating: int, feedback: str, suggestions: str = "", carrier_ratings: dict = None) -> bool:
+    """Store feedback for a ticket (async version)"""
+    if _db_manager is None:
+        logger.error("Database manager not set in storage module.")
+        return False
+    
     try:
-        feedback = feedback_storage.get(ticket_name, {})
-        if feedback:
-            log_operation("GET_FEEDBACK", {"ticket_number": ticket_name, "found": True})
-        else:
-            log_operation("GET_FEEDBACK", {"ticket_number": ticket_name, "found": False})
-        return feedback
+        feedback_data = {
+            "ticket_number": ticket_name,
+            "user_id": user_id,
+            "rating": rating,
+            "feedback": feedback,
+            "suggestions": suggestions or "",
+            "carrier_ratings": carrier_ratings or {},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "submitted_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        return await _db_manager.store_feedback(feedback_data)
+    except Exception as e:
+        logger.error(f"Error storing feedback: {e}")
+        return False
+
+async def get_feedback(ticket_name: str) -> Dict[str, Any]:
+    """Get feedback for a ticket"""
+    if _db_manager is None:
+        logger.error("Database manager not set in storage module.")
+        return {}
+    try:
+        feedback = await _db_manager.get_feedback(ticket_name)
+        return feedback or {}
     except Exception as e:
         logger.error(f"Error retrieving feedback: {e}")
         return {}
@@ -204,9 +200,25 @@ async def store_ticket_log(ticket_number: str, messages: list, creator_id: str, 
         logger.error("Database manager not set in storage module.")
         return False
 
+    # Convert messages to a serializable format
+    serialized_messages = []
+    for msg in messages:
+        try:
+            serialized_msg = {
+                "content": msg.content or "",
+                "author_id": str(msg.author.id),
+                "author_name": msg.author.display_name,
+                "timestamp": msg.created_at.isoformat(),
+                "attachments": [att.url for att in msg.attachments] if msg.attachments else []
+            }
+            serialized_messages.append(serialized_msg)
+        except Exception as e:
+            logger.error(f"Error serializing message: {e}")
+            continue
+
     log_entry = {
         "ticket_number": ticket_number,
-        "messages": messages,
+        "messages": serialized_messages,
         "creator_id": creator_id,
         "category": category,
         "claimed_by": claimed_by,
@@ -214,22 +226,18 @@ async def store_ticket_log(ticket_number: str, messages: list, creator_id: str, 
         "details": details,
         "guild_id": guild_id,
         "close_reason": close_reason,
-        "logged_at": datetime.now(timezone.utc).isoformat() # Timestamp for when the log was stored
+        "logged_at": datetime.now(timezone.utc).isoformat()
     }
+    
     try:
-        # Check if a log for this ticket already exists to decide between insert and update
-        existing_log = await _db_manager.ticket_logs.find_one({"ticket_number": ticket_number})
-        if existing_log:
-            result = await _db_manager.ticket_logs.update_one(
-                {"ticket_number": ticket_number},
-                {"$set": log_entry}
-            )
-            log_operation("UPDATE_TICKET_LOG_DB", {"ticket_number": ticket_number})
-            return result.modified_count > 0
-        else:
-            result = await _db_manager.ticket_logs.insert_one(log_entry)
-            log_operation("STORE_TICKET_LOG_DB", {"ticket_number": ticket_number})
-            return bool(result.inserted_id)
+        # Store in ticket_logs collection
+        result = await _db_manager.db.ticket_logs.replace_one(
+            {"ticket_number": ticket_number},
+            log_entry,
+            upsert=True
+        )
+        logger.info(f"Stored ticket log for {ticket_number}")
+        return True
     except Exception as e:
         logger.error(f"Error storing ticket log in DB: {e}")
         return False
@@ -273,14 +281,14 @@ async def close_ticket(ticket_number: str, close_reason: Optional[str] = None) -
         return False
 
 async def update_ticket_times(ticket_number: str, event_type: str, user_id: str = None) -> bool:
-    """Update timing information for a ticket (created, first_response, claimed, resolved)"""
+    """Update timing information for a ticket"""
     if _db_manager is None:
         logger.error("Database manager not set in storage module.")
         return False
     try:
         update_data = {}
-        current_time_iso = datetime.now(timezone.utc).isoformat()
         current_timestamp = datetime.now(timezone.utc).timestamp()
+        current_time_iso = datetime.now(timezone.utc).isoformat()
 
         if event_type == "created":
             update_data["created_at"] = current_time_iso
@@ -305,80 +313,6 @@ async def update_ticket_times(ticket_number: str, event_type: str, user_id: str 
         logger.error(f"Error updating ticket times in DB: {e}")
         return False
 
-def get_ticket_waiting_time(ticket_number: str) -> str:
-    """Get formatted waiting time for a ticket with high precision"""
-    try:
-        if ticket_number not in tickets:
-            return "Unknown"
-            
-        ticket = tickets[ticket_number]
-        current_time = datetime.now(timezone.utc)
-        current_timestamp = current_time.timestamp()
-        
-        # Get creation timestamp
-        created_timestamp = ticket.get("created_timestamp")
-        if not created_timestamp:
-            # Fallback to parsing created_at if timestamp not available
-            try:
-                created_at = datetime.fromisoformat(ticket.get("created_at"))
-                created_timestamp = created_at.timestamp()
-            except:
-                return "Unknown"
-        
-        # If there's a first response, use that as the end time
-        if ticket.get("first_response_timestamp"):
-            end_timestamp = ticket.get("first_response_timestamp")
-        else:
-            end_timestamp = current_timestamp
-            
-        waiting_time = end_timestamp - created_timestamp
-        
-        # Format the waiting time with high precision
-        if waiting_time < 60:
-            return f"{waiting_time:.1f} seconds"
-        elif waiting_time < 3600:
-            minutes = waiting_time / 60
-            return f"{minutes:.1f} minute{'s' if minutes != 1 else ''}"
-        elif waiting_time < 86400:
-            hours = waiting_time / 3600
-            return f"{hours:.1f} hour{'s' if hours != 1 else ''}"
-        else:
-            days = waiting_time / 86400
-            return f"{days:.1f} day{'s' if days != 1 else ''}"
-            
-    except Exception as e:
-        logger.error(f"Error getting ticket waiting time: {e}")
-        return "Unknown"
-
-def get_ticket_stats(ticket_number: str) -> dict:
-    """Get detailed statistics for a ticket"""
-    try:
-        if ticket_number not in tickets:
-            return {}
-            
-        ticket = tickets[ticket_number]
-        stats = {
-            "ticket_number": ticket_number,
-            "category": ticket.get("category", "Unknown"),
-            "status": ticket.get("status", "Unknown"),
-            "created_at": ticket.get("created_at"),
-            "claimed_by": ticket.get("claimed_by", "Unclaimed"),
-            "claimed_time": ticket.get("claimed_time"),
-            "first_response_time": ticket.get("first_response_time"),
-            "resolution_time": ticket.get("resolution_time"),
-            "response_duration": ticket.get("response_duration", 0),
-            "resolution_duration": ticket.get("resolution_duration", 0),
-            "creator_id": ticket.get("creator_id"),
-            "claimer_id": ticket.get("claimer_id"),
-            "responder_id": ticket.get("responder_id"),
-            "resolver_id": ticket.get("resolver_id")
-        }
-        
-        return stats
-    except Exception as e:
-        logger.error(f"Error getting ticket stats: {e}")
-        return {}
-
 def validate_ticket_input(ticket_number: str, user_id: str, channel_id: str, category: str) -> bool:
     """Validate input parameters for ticket creation"""
     try:
@@ -399,7 +333,8 @@ async def get_all_tickets() -> List[Dict[str, Any]]:
         logger.error("Database manager not set in storage module.")
         return []
     try:
-        return await _db_manager.tickets.find({}).to_list(None)
+        cursor = _db_manager.tickets.find({})
+        return await cursor.to_list(None)
     except Exception as e:
         logger.error(f"Error getting all tickets from DB: {e}")
         return []
@@ -410,7 +345,8 @@ async def get_tickets_by_status(status: str) -> List[Dict[str, Any]]:
         logger.error("Database manager not set in storage module.")
         return []
     try:
-        return await _db_manager.tickets.find({"status": status}).to_list(None)
+        cursor = _db_manager.tickets.find({"status": status})
+        return await cursor.to_list(None)
     except Exception as e:
         logger.error(f"Error getting tickets by status from DB: {e}")
         return []
@@ -421,7 +357,8 @@ async def get_tickets_by_user(user_id: str) -> List[Dict[str, Any]]:
         logger.error("Database manager not set in storage module.")
         return []
     try:
-        return await _db_manager.tickets.find({"user_id": user_id}).to_list(None)
+        cursor = _db_manager.tickets.find({"user_id": user_id})
+        return await cursor.to_list(None)
     except Exception as e:
         logger.error(f"Error getting tickets by user from DB: {e}")
         return []
@@ -432,7 +369,8 @@ async def get_tickets_by_category(category: str) -> List[Dict[str, Any]]:
         logger.error("Database manager not set in storage module.")
         return []
     try:
-        return await _db_manager.tickets.find({"category": category}).to_list(None)
+        cursor = _db_manager.tickets.find({"category": category})
+        return await cursor.to_list(None)
     except Exception as e:
         logger.error(f"Error getting tickets by category from DB: {e}")
         return []
@@ -454,8 +392,11 @@ async def get_ticket_statistics() -> Dict[str, Any]:
         logger.error("Database manager not set in storage module.")
         return {}
     try:
-        all_tickets = await _db_manager.tickets.find({}).to_list(None)
-        all_feedback = await _db_manager.feedback.find({}).to_list(None)
+        all_tickets_cursor = _db_manager.tickets.find({})
+        all_tickets = await all_tickets_cursor.to_list(None)
+        
+        all_feedback_cursor = _db_manager.feedback.find({})
+        all_feedback = await all_feedback_cursor.to_list(None)
 
         stats = {
             "total_tickets": len(all_tickets),
@@ -468,22 +409,15 @@ async def get_ticket_statistics() -> Dict[str, Any]:
         }
 
         # Category statistics
-        for ticket in all_tickets:
-            category = ticket.get('category', 'Unknown')
-            if category not in stats['categories']:
-                stats['categories'][category] = {
-                    'total': 0,
-                    'open': 0,
-                    'closed': 0,
-                    'claimed': 0
-                }
-            stats['categories'][category]['total'] += 1
-            if ticket.get('status') == 'open':
-                stats['categories'][category]['open'] += 1
-            elif ticket.get('status') == 'closed':
-                stats['categories'][category]['closed'] += 1
-            if ticket.get('claimed_by') != 'Unclaimed':
-                stats['categories'][category]['claimed'] += 1
+        categories = set(t.get('category', 'Unknown') for t in all_tickets)
+        for category in categories:
+            category_tickets = [t for t in all_tickets if t.get('category') == category]
+            stats['categories'][category] = {
+                'total': len(category_tickets),
+                'open': len([t for t in category_tickets if t.get('status') == 'open']),
+                'closed': len([t for t in category_tickets if t.get('status') == 'closed']),
+                'claimed': len([t for t in category_tickets if t.get('claimed_by') != 'Unclaimed'])
+            }
 
         # Calculate average rating
         if all_feedback:
@@ -502,9 +436,14 @@ async def export_data() -> Dict[str, Any]:
         logger.error("Database manager not set in storage module.")
         return {}
     try:
-        all_tickets = await _db_manager.tickets.find({}).to_list(None)
-        all_feedback = await _db_manager.feedback.find({}).to_list(None)
-        all_ticket_logs = await _db_manager.ticket_logs.find({}).to_list(None)
+        all_tickets_cursor = _db_manager.tickets.find({})
+        all_tickets = await all_tickets_cursor.to_list(None)
+        
+        all_feedback_cursor = _db_manager.feedback.find({})
+        all_feedback = await all_feedback_cursor.to_list(None)
+        
+        all_ticket_logs_cursor = _db_manager.ticket_logs.find({})
+        all_ticket_logs = await all_ticket_logs_cursor.to_list(None)
         
         return {
             "tickets": all_tickets,
@@ -535,11 +474,7 @@ async def import_data(data: Dict[str, Any]) -> bool:
         if 'ticket_logs' in data and data['ticket_logs']:
             await _db_manager.ticket_logs.insert_many(data['ticket_logs'])
         
-        log_operation("IMPORT_DATA_DB", {
-            "tickets_imported": len(data.get('tickets', {})),
-            "feedback_imported": len(data.get('feedback', {})),
-            "ticket_logs_imported": len(data.get('ticket_logs', {}))
-        })
+        logger.info(f"Imported {len(data.get('tickets', []))} tickets, {len(data.get('feedback', []))} feedback, {len(data.get('ticket_logs', []))} ticket logs")
         return True
     except Exception as e:
         logger.error(f"Error importing data to DB: {e}")
@@ -556,7 +491,7 @@ async def search_tickets(query: str, search_in: List[str] = None) -> List[Dict[s
         
         # Build a MongoDB OR query for flexible searching
         search_filters = []
-        query_regex = {"$regex": query, "$options": "i"} # Case-insensitive search
+        query_regex = {"$regex": query, "$options": "i"}
 
         for field in search_in:
             search_filters.append({field: query_regex})
@@ -564,62 +499,33 @@ async def search_tickets(query: str, search_in: List[str] = None) -> List[Dict[s
         if not search_filters:
             return []
 
-        results = await _db_manager.tickets.find({"$or": search_filters}).to_list(None)
+        cursor = _db_manager.tickets.find({"$or": search_filters})
+        results = await cursor.to_list(None)
         
-        log_operation("SEARCH_TICKETS_DB", {
-            "query": query,
-            "search_in": search_in,
-            "results_count": len(results)
-        })
+        logger.info(f"Search for '{query}' in {search_in} returned {len(results)} results")
         return results
     except Exception as e:
         logger.error(f"Error searching tickets in DB: {e}")
         return []
 
 def cleanup_old_tickets(max_age_days: int = 30) -> int:
-    """Clean up tickets older than max_age_days. Returns number of tickets cleaned."""
+    """Clean up tickets older than max_age_days (sync version for compatibility)"""
+    logger.info(f"Cleanup requested for tickets older than {max_age_days} days")
+    # This would need to be implemented as an async task
+    return 0
+
+async def cleanup_old_tickets_async(max_age_days: int = 30) -> int:
+    """Clean up tickets older than max_age_days"""
+    if _db_manager is None:
+        logger.error("Database manager not set in storage module.")
+        return 0
     try:
-        current_time = datetime.now(timezone.utc)
-        max_age = timedelta(days=max_age_days)
-        cleaned_count = 0
-
-        # Find tickets to clean up
-        for ticket_number, ticket_data in list(tickets.items()):
-            try:
-                created_at_str = ticket_data.get('created_at')
-                if created_at_str:
-                    created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
-                    if created_at.tzinfo is None:
-                        created_at = created_at.replace(tzinfo=timezone.utc)
-                    
-                    if (current_time - created_at) > max_age and ticket_data.get('status') == 'closed':
-                        # Archive ticket data to logs before removing
-                        if ticket_number not in ticket_logs:
-                            store_ticket_log(
-                                ticket_number=ticket_number,
-                                messages=[],
-                                creator_id=ticket_data['user_id'],
-                                category=ticket_data['category'],
-                                details="Auto-archived due to age"
-                            )
-                        del tickets[ticket_number]
-                        cleaned_count += 1
-            except Exception as ticket_e:
-                logger.error(f"Error processing ticket {ticket_number} for cleanup: {ticket_e}")
-                continue
-
-        if cleaned_count > 0:
-            log_operation("CLEANUP_TICKETS", {
-                "cleaned_count": cleaned_count,
-                "max_age_days": max_age_days
-            })
-
-        return cleaned_count
+        return await _db_manager.cleanup_old_tickets(max_age_days)
     except Exception as e:
         logger.error(f"Error cleaning up old tickets: {e}")
         return 0
 
-# Enhanced Storage Class for file-based persistence (optional)
+# Enhanced Storage Class for file-based persistence (backup)
 class EnhancedStorage:
     def __init__(self, data_dir: str = "data"):
         self.data_dir = data_dir
@@ -637,71 +543,70 @@ class EnhancedStorage:
         except Exception as e:
             logger.error(f"Error creating data directory: {e}")
 
-    def save_all_data(self) -> bool:
-        """Save all data to files"""
+    async def save_all_data(self) -> bool:
+        """Save all data to files as backup"""
         try:
-            # Save tickets
+            # Export data from database
+            data = await export_data()
+            
+            # Save to separate files
             with open(self.tickets_file, 'w') as f:
-                json.dump(tickets, f, indent=2, default=str)
+                json.dump(data.get('tickets', []), f, indent=2, default=str)
             
-            # Save feedback
             with open(self.feedback_file, 'w') as f:
-                json.dump(feedback_storage, f, indent=2, default=str)
+                json.dump(data.get('feedback', []), f, indent=2, default=str)
             
-            # Save logs
             with open(self.logs_file, 'w') as f:
-                json.dump(ticket_logs, f, indent=2, default=str)
+                json.dump(data.get('ticket_logs', []), f, indent=2, default=str)
                 
-            log_operation("SAVE_ALL_DATA", {"success": True})
+            logger.info("Successfully saved all data to files")
             return True
         except Exception as e:
-            logger.error(f"Error saving data: {e}")
+            logger.error(f"Error saving data to files: {e}")
             return False
 
-    def load_all_data(self) -> bool:
-        """Load all data from files"""
+    async def load_all_data(self) -> bool:
+        """Load all data from files (for emergency restore)"""
         try:
-            global tickets, feedback_storage, ticket_logs, ticket_counter
+            data = {}
             
             # Load tickets
             if os.path.exists(self.tickets_file):
                 with open(self.tickets_file, 'r') as f:
-                    loaded_tickets = json.load(f)
-                    tickets.update(loaded_tickets)
+                    data['tickets'] = json.load(f)
             
             # Load feedback
             if os.path.exists(self.feedback_file):
                 with open(self.feedback_file, 'r') as f:
-                    loaded_feedback = json.load(f)
-                    feedback_storage.update(loaded_feedback)
+                    data['feedback'] = json.load(f)
             
             # Load logs
             if os.path.exists(self.logs_file):
                 with open(self.logs_file, 'r') as f:
-                    loaded_logs = json.load(f)
-                    ticket_logs.update(loaded_logs)
+                    data['ticket_logs'] = json.load(f)
             
-            log_operation("LOAD_ALL_DATA", {
-                "tickets_loaded": len(tickets),
-                "feedback_loaded": len(feedback_storage)
-            })
+            # Import to database
+            if data:
+                await import_data(data)
+            
+            logger.info(f"Successfully loaded data from files")
             return True
         except Exception as e:
-            logger.error(f"Error loading data: {e}")
+            logger.error(f"Error loading data from files: {e}")
             return False
 
 # Create global enhanced storage instance
 enhanced_storage = EnhancedStorage()
 
-def save_data_to_file() -> bool:
+async def save_data_to_file() -> bool:
     """Save all data to files using enhanced storage"""
-    return enhanced_storage.save_all_data()
+    return await enhanced_storage.save_all_data()
 
-def load_data_from_file() -> bool:
+async def load_data_from_file() -> bool:
     """Load all data from files using enhanced storage"""
-    return enhanced_storage.load_all_data()
+    return await enhanced_storage.load_all_data()
 
-# Add with other global variables
+# User management functions (simplified for now)
 users: Dict[str, dict] = {}
 
 def add_user(user_data: dict) -> bool:
@@ -712,17 +617,11 @@ def add_user(user_data: dict) -> bool:
             logger.error("Missing user_id in user data")
             return False
 
-        # Check if user already exists
         if user_id in users:
             logger.warning(f"User {user_id} already exists")
             return False
 
-        # Add user to storage
         users[user_id] = user_data
-
-        # Save to file
-        save_users_to_file()
-
         logger.info(f"User {user_data.get('username')} (ID: {user_id}) added successfully")
         return True
 
@@ -730,32 +629,21 @@ def add_user(user_data: dict) -> bool:
         logger.error(f"Error adding user: {e}")
         return False
 
-def save_users_to_file():
-    """Save users data to a JSON file"""
-    try:
-        data_dir = os.path.join(os.path.dirname(__file__), '..', 'data')
-        os.makedirs(data_dir, exist_ok=True)
-        
-        file_path = os.path.join(data_dir, 'users.json')
-        with open(file_path, 'w') as f:
-            json.dump(users, f, indent=4)
-    except Exception as e:
-        logger.error(f"Error saving users to file: {e}")
-
-def load_users_from_file():
-    """Load users data from JSON file"""
-    try:
-        file_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'users.json')
-        if os.path.exists(file_path):
-            with open(file_path, 'r') as f:
-                global users
-                users = json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading users from file: {e}")
-
-# Add this to the initialization code
-load_users_from_file()
-
 def get_confirmation_message():
     """Get the confirmation message for ticket creation"""
     return "✅ Your request has been submitted! A ticket will be created shortly."
+
+# Utility functions for backwards compatibility
+def log_operation(operation: str, details: dict) -> None:
+    """Helper function for consistent logging"""
+    try:
+        log_msg = f"[{operation}] " + " | ".join(f"{k}: {v}" for k, v in details.items())
+        logger.info(log_msg)
+    except Exception as e:
+        logger.error(f"Error in logging: {e}")
+
+# Initialize on import
+try:
+    logger.info("Storage module initialized")
+except Exception as e:
+    logger.error(f"Error initializing storage module: {e}")

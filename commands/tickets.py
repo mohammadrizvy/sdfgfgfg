@@ -15,7 +15,7 @@ logger = logging.getLogger('discord')
 class TicketCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.active_categories = ['Slayer Carry', 'Normal Dungeon Carry', 'Master Dungeon Carry']
+        self.active_categories = ['Slayer Carry', 'Normal Dungeon Carry', 'Master Dungeon Carry', 'Staff Applications']
         logger.info("TicketCommands cog initialized")
         
         # Add message event listener
@@ -27,8 +27,8 @@ class TicketCommands(commands.Cog):
             logger.info(f"Creating ticket channel for {interaction.user.name} in category {category}")
 
             # Check if user already has an open ticket
-            if storage.has_open_ticket(str(interaction.user.id)):
-                existing_channel_id = storage.get_user_ticket_channel(str(interaction.user.id))
+            if await storage.has_open_ticket(str(interaction.user.id)):
+                existing_channel_id = await storage.get_user_ticket_channel(str(interaction.user.id))
 
                 if existing_channel_id:
                     try:
@@ -37,12 +37,11 @@ class TicketCommands(commands.Cog):
                             # Extract ticket number from existing channel name
                             try:
                                 existing_ticket_number = existing_channel.name.split('-')[1]
-                                existing_ticket_data = storage.get_ticket_log(existing_ticket_number)
+                                existing_ticket_data = await storage.get_ticket_log(existing_ticket_number)
 
                                 # If the existing ticket's category is no longer active, allow new ticket creation
                                 if existing_ticket_data and existing_ticket_data.get('category') not in self.active_categories:
                                     logger.info(f"User {interaction.user.name} has an inactive ticket open ({existing_ticket_data.get('category')}). Allowing new ticket creation.")
-                                    # Do not return here, allow the function to proceed and create a new ticket.
                                 else:
                                     # Existing ticket is active, so block new creation
                                     await interaction.followup.send(
@@ -53,8 +52,8 @@ class TicketCommands(commands.Cog):
                                         ),
                                         ephemeral=True
                                     )
-                                    return None # Block new ticket
-                            except IndexError:
+                                    return None
+                            except (IndexError, TypeError):
                                 logger.warning(f"Could not parse ticket number from existing channel name: {existing_channel.name}. Blocking new ticket creation to be safe.")
                                 await interaction.followup.send(
                                     embed=discord.Embed(
@@ -65,12 +64,10 @@ class TicketCommands(commands.Cog):
                                     ephemeral=True
                                 )
                                 return None
-                        else: # existing_channel is None (channel might have been deleted but storage not updated)
+                        else:
                             logger.info(f"User {interaction.user.name} has a ghost ticket entry. Proceeding with new ticket creation.")
-                            # Do nothing, allow creation of new ticket
                     except (ValueError, TypeError) as e:
                         logger.error(f"Error converting channel ID: {e}")
-                        # If error converting channel ID, better to block than proceed with potentially invalid state
                         await interaction.followup.send(
                             embed=discord.Embed(
                                 title="❌ Error",
@@ -88,7 +85,7 @@ class TicketCommands(commands.Cog):
                 logger.info(f"Created new category: {category}")
 
             # Generate ticket number
-            ticket_number = storage.get_next_ticket_number()
+            ticket_number = await storage.get_next_ticket_number()
             if not ticket_number:
                 logger.error("Failed to generate ticket number")
                 await interaction.followup.send("Error creating ticket: Failed to generate ticket number", ephemeral=True)
@@ -217,7 +214,7 @@ class TicketCommands(commands.Cog):
                     logger.warning(f"No carrier role defined for category: {category}")
 
             # Store ticket information with creation time
-            stored = storage.create_ticket(
+            stored = await storage.create_ticket(
                 ticket_number=ticket_number,
                 user_id=str(interaction.user.id),
                 channel_id=str(ticket_channel.id),
@@ -227,8 +224,13 @@ class TicketCommands(commands.Cog):
                 control_message_id=control_message.id
             )
             
+            if not stored:
+                logger.error(f"Failed to store ticket {ticket_number}")
+                await interaction.followup.send("❌ Failed to store ticket information.", ephemeral=True)
+                return None
+            
             # Set creation time
-            storage.update_ticket_times(ticket_number, "created", str(interaction.user.id))
+            await storage.update_ticket_times(ticket_number, "created", str(interaction.user.id))
             
             logger.info(f"[DEBUG] Ticket {ticket_number} stored with details: {details}")
 
@@ -278,7 +280,7 @@ class TicketCommands(commands.Cog):
                 return
             
             # Get ticket data
-            ticket_data = storage.get_ticket_log(ticket_number)
+            ticket_data = await storage.get_ticket_log(ticket_number)
             if not ticket_data:
                 return
 
@@ -288,7 +290,7 @@ class TicketCommands(commands.Cog):
             
             if required_role and any(role.name == required_role for role in message.author.roles):
                 # Update first response time if this is the first staff response
-                storage.update_ticket_times(ticket_number, "first_response", str(message.author.id))
+                await storage.update_ticket_times(ticket_number, "first_response", str(message.author.id))
                 logger.info(f"Staff response recorded for ticket {ticket_number} by {message.author.name}")
 
         except Exception as e:
@@ -338,7 +340,7 @@ class TicketCommands(commands.Cog):
                 return
 
             # Get ticket data
-            ticket_data = storage.get_ticket_log(ticket_number)
+            ticket_data = await storage.get_ticket_log(ticket_number)
             if not ticket_data:
                 await interaction.response.send_message(
                     embed=discord.Embed(
@@ -355,10 +357,10 @@ class TicketCommands(commands.Cog):
 
             try:
                 # Update ticket times
-                storage.update_ticket_times(ticket_number, "resolved", str(interaction.user.id))
+                await storage.update_ticket_times(ticket_number, "resolved", str(interaction.user.id))
                 
                 # Close the ticket
-                storage.close_ticket(ticket_number, reason)
+                await storage.close_ticket(ticket_number, reason)
                 
                 # Send closing message
                 await interaction.channel.send(
@@ -432,7 +434,7 @@ class TicketCommands(commands.Cog):
                                     "We hope you had a great experience with our support team. Your feedback helps us improve and provide even better service!\n\n"
                                     "Please take a moment to rate your overall experience below. It's quick, easy, and incredibly valuable to us!"
                                 ),
-                                color=discord.Color.from_rgb(255, 215, 0) # Gold color for better visibility
+                                color=discord.Color.from_rgb(255, 215, 0)
                             )
                             feedback_embed.add_field(
                                 name="💡 Why Your Feedback is Important",
@@ -447,7 +449,7 @@ class TicketCommands(commands.Cog):
                             feedback_embed.set_footer(
                                 text="FakePixel Giveaways • Customer Satisfaction Survey"
                             )
-                            feedback_embed.set_thumbnail(url='https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo') # Using the same thumbnail for consistency
+                            feedback_embed.set_thumbnail(url='https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo')
                             
                             try:
                                 await creator.send(embed=feedback_embed, view=view)
@@ -456,6 +458,19 @@ class TicketCommands(commands.Cog):
                                 
                 except Exception as feedback_error:
                     logger.error(f"Error sending feedback request: {feedback_error}")
+                
+                # Store the ticket log with all messages
+                await storage.store_ticket_log(
+                    ticket_number=ticket_number,
+                    messages=messages,
+                    creator_id=ticket_data.get('creator_id'),
+                    category=ticket_data.get('category'),
+                    claimed_by=ticket_data.get('claimed_by'),
+                    closed_by=str(interaction.user.id),
+                    details=ticket_data.get('details'),
+                    guild_id=interaction.guild.id,
+                    close_reason=reason
+                )
                 
                 # Wait before deleting
                 await asyncio.sleep(10)
@@ -526,6 +541,116 @@ class TicketCommands(commands.Cog):
         lines.append("=" * 70)
         
         return "\n".join(lines)
+
+    @app_commands.command(name="ticket_stats")
+    @app_commands.describe(ticket_number="The ticket number to get stats for")
+    async def ticket_stats(self, interaction: discord.Interaction, ticket_number: str = None):
+        """Get statistics for a specific ticket or general stats"""
+        try:
+            if not any(role.name in ["Staff", "Admin", "Moderator"] for role in interaction.user.roles):
+                await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title="❌ Permission Denied",
+                        description="Only staff members can view ticket statistics.",
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            if ticket_number:
+                # Get specific ticket stats
+                ticket_data = await storage.get_ticket(ticket_number)
+                if not ticket_data:
+                    await interaction.response.send_message(
+                        embed=discord.Embed(
+                            title="❌ Ticket Not Found",
+                            description=f"No ticket found with number {ticket_number}",
+                            color=discord.Color.red()
+                        ),
+                        ephemeral=True
+                    )
+                    return
+
+                embed = discord.Embed(
+                    title=f"📊 Ticket #{ticket_number} Statistics",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.utcnow()
+                )
+
+                embed.add_field(
+                    name="Basic Information",
+                    value=(
+                        f"**Category:** {ticket_data.get('category', 'Unknown')}\n"
+                        f"**Status:** {ticket_data.get('status', 'Unknown')}\n"
+                        f"**Claimed By:** {ticket_data.get('claimed_by', 'Unclaimed')}"
+                    ),
+                    inline=True
+                )
+
+                # Add timing information if available
+                created_at = ticket_data.get('created_at')
+                if created_at:
+                    embed.add_field(
+                        name="Timeline",
+                        value=f"**Created:** <t:{int(discord.utils.parse_time(created_at).timestamp())}:R>",
+                        inline=True
+                    )
+
+            else:
+                # Get general statistics
+                stats = await storage.get_ticket_statistics()
+                
+                embed = discord.Embed(
+                    title="📊 General Ticket Statistics",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.utcnow()
+                )
+                
+                embed.add_field(
+                    name="Overall Stats",
+                    value=(
+                        f"**Total Tickets:** {stats.get('total_tickets', 0)}\n"
+                        f"**Open Tickets:** {stats.get('open_tickets', 0)}\n"
+                        f"**Closed Tickets:** {stats.get('closed_tickets', 0)}\n"
+                        f"**Claimed Tickets:** {stats.get('claimed_tickets', 0)}"
+                    ),
+                    inline=True
+                )
+                
+                if stats.get('categories'):
+                    category_text = []
+                    for category, cat_stats in stats['categories'].items():
+                        category_text.append(f"**{category}:** {cat_stats['total']} total ({cat_stats['open']} open)")
+                    
+                    embed.add_field(
+                        name="By Category",
+                        value="\n".join(category_text[:5]),  # Limit to 5 categories
+                        inline=True
+                    )
+                
+                feedback_info = f"**Total Feedback:** {stats.get('total_feedback', 0)}"
+                if stats.get('average_rating'):
+                    feedback_info += f"\n**Average Rating:** {stats['average_rating']:.1f}/5.0"
+                
+                embed.add_field(
+                    name="Feedback Stats",
+                    value=feedback_info,
+                    inline=True
+                )
+
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"Error in ticket_stats command: {e}")
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="❌ Error",
+                    description="An error occurred while retrieving statistics.",
+                    color=discord.Color.red()
+                ),
+                ephemeral=True
+            )
 
 async def setup(bot):
     await bot.add_cog(TicketCommands(bot))

@@ -39,9 +39,7 @@ class TicketCategorySelect(discord.ui.Select):
             selected_category = self.values[0]
             logger.info(f"Selected category: {selected_category}")
 
-            if selected_category == "Staff Application":
-                modal = StaffApplicationModal(self.bot)
-            elif selected_category == "Slayer Carry":
+            if selected_category == "Slayer Carry":
                 modal = SlayerCarryModal(self.bot)
             else:
                 modal = CarryRequestModal(self.bot, selected_category)
@@ -50,93 +48,27 @@ class TicketCategorySelect(discord.ui.Select):
 
         except Exception as e:
             logger.error(f"Error in ticket creation callback: {e}")
-            await interaction.followup.send(
-                embed=discord.Embed(
-                    title="❌ Error",
-                    description="An error occurred while creating the ticket.",
-                    color=discord.Color.red()
-                ),
-                ephemeral=True
-            )
-
-class StaffApplicationModal(discord.ui.Modal):
-    def __init__(self, bot):
-        super().__init__(title="Staff Application")
-        self.bot = bot
-        
-        self.in_game_name = discord.ui.TextInput(
-            label="In-Game Name",
-            placeholder="Your in-game username",
-            required=True,
-            max_length=50
-        )
-        self.name = discord.ui.TextInput(
-            label="Full Name",
-            placeholder="Your full name (letters only)",
-            required=True,
-            max_length=50
-        )
-        self.age = discord.ui.TextInput(
-            label="Age",
-            placeholder="Your age (numbers only)",
-            required=True,
-            max_length=2
-        )
-        self.availability = discord.ui.TextInput(
-            label="Country and Available Hours",
-            placeholder="Your country and available hours per day",
-            required=True,
-            max_length=100
-        )
-        self.experience = discord.ui.TextInput(
-            label="Previous Experience",
-            placeholder="Describe your relevant experience",
-            required=True,
-            style=discord.TextStyle.paragraph,
-            max_length=1000
-        )
-        
-        for field in [self.in_game_name, self.name, self.age, self.availability, self.experience]:
-            self.add_item(field)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            # Validate age is numeric
-            if not self.age.value.isdigit():
-                await interaction.response.send_message("Age must be a number.", ephemeral=True)
-                return
-
-            # Validate name contains only letters and spaces
-            if not all(c.isalpha() or c.isspace() for c in self.name.value):
-                await interaction.response.send_message("Name must contain only letters.", ephemeral=True)
-                return
-
-            application_details = (
-                f"**In-Game Name:** {self.in_game_name.value}\n"
-                f"**Name:** {self.name.value}\n"
-                f"**Age:** {self.age.value}\n"
-                f"**Country and Available Hours:** {self.availability.value}\n"
-                f"**Previous Experience:** {self.experience.value}"
-            )
-
-            ticket_commands = self.bot.get_cog('TicketCommands')
-            if ticket_commands:
-                await interaction.response.send_message("✅ Your application has been submitted!", ephemeral=True)
-                await ticket_commands.create_ticket_channel(interaction, "Staff Applications", application_details)
-            else:
-                logger.error("TicketCommands cog not found")
-                await interaction.response.send_message(
-                    "An error occurred while creating the application.",
-                    ephemeral=True
-                )
-
-        except Exception as e:
-            logger.error(f"Error in staff application submission: {e}")
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "An error occurred while creating the application.",
-                    ephemeral=True
-                )
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        embed=discord.Embed(
+                            title="❌ Error",
+                            description="An error occurred while creating the ticket.",
+                            color=discord.Color.red()
+                        ),
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.followup.send(
+                        embed=discord.Embed(
+                            title="❌ Error",
+                            description="An error occurred while creating the ticket.",
+                            color=discord.Color.red()
+                        ),
+                        ephemeral=True
+                    )
+            except Exception as followup_error:
+                logger.error(f"Error sending error message: {followup_error}")
 
 class SlayerCarryModal(discord.ui.Modal):
     def __init__(self, bot):
@@ -173,7 +105,9 @@ class SlayerCarryModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            # No validation needed as per user request
+            # Defer the response immediately
+            await interaction.response.defer(ephemeral=True)
+            
             carry_details = (
                 f"**In-Game Name:** {self.in_game_name.value}\n"
                 f"**Slayer Type:** {self.slayer_type.value}\n"
@@ -183,21 +117,24 @@ class SlayerCarryModal(discord.ui.Modal):
 
             ticket_commands = self.bot.get_cog('TicketCommands')
             if ticket_commands:
-                await interaction.response.send_message("✅ Your slayer carry request has been submitted!", ephemeral=True)
+                await interaction.followup.send("✅ Your slayer carry request has been submitted!", ephemeral=True)
                 await ticket_commands.create_ticket_channel(interaction, "Slayer Carry", carry_details)
             else:
                 logger.error("TicketCommands cog not found")
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "An error occurred while creating the ticket.",
                     ephemeral=True
                 )
 
         except Exception as e:
             logger.error(f"Error in slayer carry submission: {e}")
-            await interaction.response.send_message(
-                "An error occurred while creating the ticket.",
-                ephemeral=True
-            )
+            try:
+                await interaction.followup.send(
+                    "An error occurred while creating the ticket.",
+                    ephemeral=True
+                )
+            except:
+                pass
 
 class CarryRequestModal(discord.ui.Modal):
     def __init__(self, bot, category):
@@ -235,12 +172,14 @@ class CarryRequestModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            # Defer the response immediately
+            await interaction.response.defer(ephemeral=True)
+            
             in_game_name = self.in_game_name.value
             floor = self.floor.value.upper()
             completion = self.completion.value.upper()
             carries = self.carries.value
 
-            # No validation needed as per user request
             carry_details = (
                 f"**In-Game Name:** {in_game_name}\n"
                 f"**Floor:** {floor}\n"
@@ -250,21 +189,24 @@ class CarryRequestModal(discord.ui.Modal):
 
             ticket_commands = self.bot.get_cog('TicketCommands')
             if ticket_commands:
-                await interaction.response.send_message("✅ Your carry request has been submitted!", ephemeral=True)
+                await interaction.followup.send("✅ Your carry request has been submitted!", ephemeral=True)
                 await ticket_commands.create_ticket_channel(interaction, self.category, carry_details)
             else:
                 logger.error("TicketCommands cog not found")
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "An error occurred while creating the ticket.",
                     ephemeral=True
                 )
 
         except Exception as e:
             logger.error(f"Error in carry request submission: {e}")
-            await interaction.response.send_message(
-                "An error occurred while creating the ticket.",
-                ephemeral=True
-            )
+            try:
+                await interaction.followup.send(
+                    "An error occurred while creating the ticket.",
+                    ephemeral=True
+                )
+            except:
+                pass
 
 class AdminCommands(commands.Cog):
     def __init__(self, bot):
@@ -276,34 +218,38 @@ class AdminCommands(commands.Cog):
     async def ticket_setup(self, interaction: discord.Interaction, channel: discord.TextChannel):
         """Set up the ticket system in a specific channel"""
         try:
+            # Respond immediately to prevent timeout
+            await interaction.response.defer(ephemeral=True)
+            
             logger.info(f"Setting up ticket system in channel: {channel.name}")
 
             # Delete existing messages in the channel
             try:
+                deleted_count = 0
                 async for message in channel.history(limit=100):
                     if message.author == self.bot.user:
                         await message.delete()
-                logger.info("Deleted existing ticket panel messages")
+                        deleted_count += 1
+                if deleted_count > 0:
+                    logger.info(f"Deleted {deleted_count} existing ticket panel messages")
             except Exception as e:
                 logger.error(f"Error deleting old messages: {e}")
 
             embed = discord.Embed(
-                title="🎮 Carry Service",
+                title="🎫 Ticket System",
                 description=(
-                    "Welcome to our carry service! Choose a service below to create a ticket.\n\n"
-                    "**Available Services:**\n\n"
+                    "Welcome to our ticket system! Please select a category below to create a ticket.\n\n"
                     "⚔️ **Slayer Carry**\n"
                     "• Get help with any slayer task\n"
-                    "• Fast and efficient completion\n"
-                    "• Experienced slayers available\n\n"
+                    "• Professional slayer assistance\n"
+                    "• Fast and efficient service\n\n"
                     "🏰 **Normal Dungeon Carry**\n"
                     "• Complete any normal dungeon\n"
-                    "• Safe and reliable runs\n"
-                    "• Experienced dungeoneers\n\n"
+                    "• Expert guidance\n"
+                    "• Guaranteed completion\n\n"
                     "👑 **Master Dungeon Carry**\n"
-                    "• Master dungeon completion\n"
                     "• High-level dungeon experts\n"
-                    "• Efficient completion times"
+                    "• Efficient completion times\n"
                 ),
                 color=discord.Color.blue()
             )
@@ -322,7 +268,9 @@ class AdminCommands(commands.Cog):
 
             # Send the embed with the view
             await channel.send(embed=embed, view=view)
-            await interaction.response.send_message(
+            
+            # Send success response
+            await interaction.followup.send(
                 embed=discord.Embed(
                     title="✅ Ticket System Setup Complete",
                     description=f"Ticket system has been set up in {channel.mention}",
@@ -334,14 +282,17 @@ class AdminCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Error setting up ticket system: {e}")
-            await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="❌ Error",
-                    description="An error occurred while setting up the ticket system.",
-                    color=discord.Color.red()
-                ),
-                ephemeral=True
-            )
+            try:
+                await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="❌ Error",
+                        description="An error occurred while setting up the ticket system.",
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
+                )
+            except Exception as followup_error:
+                logger.error(f"Error sending followup message: {followup_error}")
 
     @app_commands.command(name="add_user")
     @app_commands.describe(user="The user to add", role="The role to assign (staff, carrier, moderator)")
@@ -349,10 +300,13 @@ class AdminCommands(commands.Cog):
     async def add_user(self, interaction: discord.Interaction, user: discord.Member, role: str):
         """Add a user to the system with a specific role"""
         try:
+            # Respond immediately
+            await interaction.response.defer(ephemeral=True)
+            
             # Validate role
             valid_roles = ["staff", "carrier", "moderator"]
             if role.lower() not in valid_roles:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     embed=discord.Embed(
                         title="❌ Invalid Role",
                         description=f"Please specify one of these roles: {', '.join(valid_roles)}",
@@ -392,10 +346,10 @@ class AdminCommands(commands.Cog):
                 )
                 embed.set_footer(text=f"User ID: {user.id}")
 
-                await interaction.response.send_message(embed=embed)
+                await interaction.followup.send(embed=embed)
                 logger.info(f"User {user.name} (ID: {user.id}) added with role: {role}")
             else:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     embed=discord.Embed(
                         title="❌ Error",
                         description="Failed to add user. Please try again.",
@@ -406,14 +360,17 @@ class AdminCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Error in add_user command: {e}")
-            await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="❌ Error",
-                    description="An error occurred while adding the user.",
-                    color=discord.Color.red()
-                ),
-                ephemeral=True
-            )
+            try:
+                await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="❌ Error",
+                        description="An error occurred while adding the user.",
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
+                )
+            except:
+                pass
 
 async def setup(bot):
     await bot.add_cog(AdminCommands(bot))

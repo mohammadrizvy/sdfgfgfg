@@ -2,9 +2,10 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
 import logging
 import motor.motor_asyncio
-from pymongo import MongoClient, ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import PyMongoError
 import asyncio
+import os
 from .config import MONGODB_URI, DATABASE_NAME, COLLECTIONS
 
 logger = logging.getLogger('discord')
@@ -20,11 +21,11 @@ class DatabaseManager:
 
     def __init__(self):
         if not DatabaseManager._initialized:
-            if not MONGODB_URI:
-                raise ValueError("MongoDB URI not found in environment variables")
+            # Get MongoDB URI from environment or use default
+            mongo_uri = MONGODB_URI or os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
             
             # Initialize async client
-            self.client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
+            self.client = motor.motor_asyncio.AsyncIOMotorClient(mongo_uri)
             self.db = self.client[DATABASE_NAME]
             
             # Initialize collections
@@ -36,9 +37,21 @@ class DatabaseManager:
             self.ticket_logs = self.db[COLLECTIONS['ticket_logs']]
             self.bot_config = self.db[COLLECTIONS['bot_config']]
             
-            # Create indexes
-            asyncio.create_task(self._create_indexes())
             DatabaseManager._initialized = True
+    
+    async def connect(self):
+        """Establish database connection and create indexes"""
+        try:
+            # Test connection
+            await self.client.admin.command('ping')
+            logger.info("Successfully connected to MongoDB")
+            
+            # Create indexes
+            await self._create_indexes()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to MongoDB: {e}")
+            return False
 
     async def _create_indexes(self):
         """Create necessary indexes for performance"""
@@ -47,6 +60,7 @@ class DatabaseManager:
             await self.tickets.create_index([("user_id", ASCENDING)])
             await self.tickets.create_index([("status", ASCENDING)])
             await self.tickets.create_index([("created_at", DESCENDING)])
+            await self.tickets.create_index([("ticket_number", ASCENDING)], unique=True)
             
             # Messages collection indexes
             await self.ticket_messages.create_index([("ticket_number", ASCENDING)])
@@ -81,7 +95,7 @@ class DatabaseManager:
             return "10000"
         except PyMongoError as e:
             logger.error(f"Error getting next ticket number: {e}")
-            return str(10000)
+            return "10000"
 
     async def has_open_ticket(self, user_id: str) -> bool:
         """Check if a user has any open tickets"""
@@ -160,7 +174,7 @@ class DatabaseManager:
                 {
                     "$set": {
                         "status": "closed",
-                        "closed_at": datetime.now(timezone.utc)
+                        "closed_at": datetime.now(timezone.utc).isoformat()
                     }
                 }
             )
@@ -175,7 +189,7 @@ class DatabaseManager:
             cutoff_date = datetime.now(timezone.utc) - timedelta(days=max_age_days)
             result = await self.tickets.delete_many({
                 "status": "closed",
-                "closed_at": {"$lt": cutoff_date}
+                "closed_at": {"$lt": cutoff_date.isoformat()}
             })
             return result.deleted_count
         except PyMongoError as e:
@@ -185,7 +199,20 @@ class DatabaseManager:
     async def get_all_open_tickets(self) -> List[Dict[str, Any]]:
         """Get all tickets that are currently open"""
         try:
-            return await self.tickets.find({"status": {"$ne": "closed"}}).to_list(None)
+            cursor = self.tickets.find({"status": {"$ne": "closed"}})
+            return await cursor.to_list(None)
         except PyMongoError as e:
             logger.error(f"Error getting all open tickets: {e}")
             return []
+
+    async def get_user_ticket_channel(self, user_id: str) -> Optional[str]:
+        """Get the channel ID of user's open ticket if exists"""
+        try:
+            ticket = await self.tickets.find_one({
+                "user_id": user_id, 
+                "status": "open"
+            })
+            return ticket.get('channel_id') if ticket else None
+        except PyMongoError as e:
+            logger.error(f"Error getting user ticket channel: {e}")
+            return None

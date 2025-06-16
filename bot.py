@@ -7,7 +7,6 @@ import asyncio
 from utils import storage
 from utils.views import TicketControlsView
 from utils.database import DatabaseManager
-from utils.config import MONGODB_URI, DATABASE_NAME
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -60,19 +59,16 @@ async def setup_commands():
         await bot.add_cog(TicketCommands(bot))
         
         # Sync command tree
-        for guild in bot.guilds:
-            await bot.tree.sync(guild=guild)
-            logger.info(f"Commands synced for guild: {guild.name}")
-            # Log the commands registered for each guild
-            guild_commands = await bot.tree.fetch_commands(guild=guild)
-            command_names = [cmd.name for cmd in guild_commands]
-            logger.info(f"Registered commands for {guild.name}: {', '.join(command_names)}")
+        try:
+            synced = await bot.tree.sync()
+            logger.info(f"Synced {len(synced)} command(s)")
+        except Exception as e:
+            logger.error(f"Failed to sync commands: {e}")
 
         logger.info("Commands registered and synced successfully")
         
     except Exception as e:
         logger.error(f"Error setting up commands: {e}")
-        # Don't raise - let bot continue without commands for debugging
 
 async def setup_required_channels(guild: discord.Guild):
     """Create required channels if they don't exist"""
@@ -108,39 +104,47 @@ async def on_ready():
         
         # Initialize database manager and connect
         bot.db = DatabaseManager()
-        await bot.db.connect() # Ensure connection is established
-        storage.set_db_manager(bot.db) # Set the database manager in the storage module
+        await bot.db.connect()
+        storage.set_db_manager(bot.db)
         
         # Register persistent views for existing tickets
         logger.info("Registering persistent views...")
-        open_tickets = await bot.db.get_all_open_tickets()
-        for ticket in open_tickets:
-            ticket_number = ticket.get('ticket_number')
-            channel_id = ticket.get('channel_id')
-            control_message_id = ticket.get('control_message_id')
+        try:
+            open_tickets = await bot.db.get_all_open_tickets()
+            for ticket in open_tickets:
+                ticket_number = ticket.get('ticket_number')
+                channel_id = ticket.get('channel_id')
+                control_message_id = ticket.get('control_message_id')
 
-            if ticket_number and channel_id and control_message_id:
-                try:
-                    channel = bot.get_channel(int(channel_id))
-                    if not channel: # Channel might have been deleted
-                        channel = await bot.fetch_channel(int(channel_id))
+                if ticket_number and channel_id and control_message_id:
+                    try:
+                        channel = bot.get_channel(int(channel_id))
+                        if not channel:
+                            try:
+                                channel = await bot.fetch_channel(int(channel_id))
+                            except discord.NotFound:
+                                logger.warning(f"Channel {channel_id} not found for ticket {ticket_number}")
+                                continue
 
-                    if channel and isinstance(channel, discord.TextChannel):
-                        message = await channel.fetch_message(int(control_message_id))
-                        if message:
-                            view = TicketControlsView(bot, ticket_number)
-                            bot.add_view(view) # Re-add the view for persistence
-                            view.message = message # Set the message for the view
-                            await message.edit(view=view) # Explicitly edit the message to apply the view
-                            logger.info(f"Registered and updated persistent view for ticket {ticket_number} in channel {channel_id}")
-                        else:
-                            logger.warning(f"Control message {control_message_id} not found for ticket {ticket_number}.")
-                    else:
-                        logger.warning(f"Channel {channel_id} not found or not a text channel for ticket {ticket_number}.")
-                except discord.NotFound:
-                    logger.warning(f"Channel or message for ticket {ticket_number} not found (Discord.NotFound). Skipping persistent view registration.")
-                except Exception as e:
-                    logger.error(f"Error fetching/updating message for persistent view ticket {ticket_number}: {e}")
+                        if channel and isinstance(channel, discord.TextChannel):
+                            try:
+                                message = await channel.fetch_message(int(control_message_id))
+                                if message:
+                                    # Create view with proper initialization from database
+                                    view = TicketControlsView(bot, ticket_number, initialize_from_db=True)
+                                    view.message = message
+                                    bot.add_view(view)
+                                    
+                                    # Wait a bit for async initialization to complete
+                                    await asyncio.sleep(0.5)
+                                    
+                                    logger.info(f"Registered persistent view for ticket {ticket_number}")
+                            except discord.NotFound:
+                                logger.warning(f"Control message {control_message_id} not found for ticket {ticket_number}")
+                    except Exception as e:
+                        logger.error(f"Error registering persistent view for ticket {ticket_number}: {e}")
+        except Exception as e:
+            logger.error(f"Error during persistent view registration: {e}")
 
         # Set up commands
         await setup_commands()
