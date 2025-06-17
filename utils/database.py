@@ -7,6 +7,9 @@ from pymongo.errors import PyMongoError
 import asyncio
 import os
 from .config import MONGODB_URI, DATABASE_NAME, COLLECTIONS
+import sqlite3
+import json
+import aiosqlite
 
 logger = logging.getLogger('discord')
 
@@ -37,6 +40,11 @@ class DatabaseManager:
             self.ticket_logs = self.db[COLLECTIONS['ticket_logs']]
             self.bot_config = self.db[COLLECTIONS['bot_config']]
             
+            self.db_path = 'data/tickets.db'
+            self.backup_dir = 'backups'
+            os.makedirs('data', exist_ok=True)
+            os.makedirs(self.backup_dir, exist_ok=True)
+            
             DatabaseManager._initialized = True
     
     async def connect(self):
@@ -48,6 +56,10 @@ class DatabaseManager:
             
             # Create indexes
             await self._create_indexes()
+
+            self.conn = await aiosqlite.connect(self.db_path)
+            await self.create_tables()
+            logger.info("Database connection established")
             return True
         except Exception as e:
             logger.error(f"Failed to connect to MongoDB: {e}")
@@ -73,6 +85,47 @@ class DatabaseManager:
         except PyMongoError as e:
             logger.error(f"Error creating database indexes: {e}")
 
+    async def create_tables(self):
+        try:
+            async with self.conn.cursor() as cursor:
+                await cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS tickets (
+                        ticket_number INTEGER PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        description TEXT,
+                        channel_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        closed_at TIMESTAMP,
+                        control_message_id TEXT
+                    )
+                ''')
+
+                await cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS ticket_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                ''')
+
+                await cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS ticket_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ticket_number INTEGER NOT NULL,
+                        action TEXT NOT NULL,
+                        user TEXT NOT NULL,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (ticket_number) REFERENCES tickets (ticket_number)
+                    )
+                ''')
+
+                await self.conn.commit()
+                logger.info("Database tables created successfully")
+        except Exception as e:
+            logger.error(f"Error creating database tables: {e}")
+            raise
+
     async def create_ticket(self, ticket_data: Dict[str, Any]) -> Optional[str]:
         """Create a new ticket in the database"""
         try:
@@ -87,15 +140,13 @@ class DatabaseManager:
     async def get_next_ticket_number(self) -> str:
         """Get the next available ticket number"""
         try:
-            latest_ticket = await self.tickets.find_one(
-                sort=[("ticket_number", DESCENDING)]
-            )
-            if latest_ticket:
-                return str(int(latest_ticket['ticket_number']) + 1)
-            return "10000"
-        except PyMongoError as e:
+            async with self.conn.cursor() as cursor:
+                await cursor.execute("SELECT MAX(ticket_number) FROM tickets")
+                result = await cursor.fetchone()
+                return str((result[0] or 0) + 1)
+        except Exception as e:
             logger.error(f"Error getting next ticket number: {e}")
-            return "10000"
+            raise
 
     async def has_open_ticket(self, user_id: str) -> bool:
         """Check if a user has any open tickets"""
@@ -216,3 +267,178 @@ class DatabaseManager:
         except PyMongoError as e:
             logger.error(f"Error getting user ticket channel: {e}")
             return None
+
+    async def get_ticket_info(self, ticket_number):
+        try:
+            async with self.conn.cursor() as cursor:
+                await cursor.execute('''
+                    SELECT * FROM tickets WHERE ticket_number = ?
+                ''', (ticket_number,))
+                result = await cursor.fetchone()
+                
+                if result:
+                    return {
+                        'ticket_number': result[0],
+                        'user_id': result[1],
+                        'category': result[2],
+                        'description': result[3],
+                        'channel_id': result[4],
+                        'status': result[5],
+                        'created_at': result[6],
+                        'closed_at': result[7],
+                        'control_message_id': result[8]
+                    }
+                return None
+        except Exception as e:
+            logger.error(f"Error getting ticket info: {e}")
+            raise
+
+    async def get_all_closed_tickets(self):
+        try:
+            async with self.conn.cursor() as cursor:
+                await cursor.execute('''
+                    SELECT * FROM tickets WHERE status = 'closed'
+                ''')
+                results = await cursor.fetchall()
+                
+                tickets = []
+                for result in results:
+                    tickets.append({
+                        'ticket_number': result[0],
+                        'user_id': result[1],
+                        'category': result[2],
+                        'description': result[3],
+                        'channel_id': result[4],
+                        'status': result[5],
+                        'created_at': result[6],
+                        'closed_at': result[7],
+                        'control_message_id': result[8]
+                    })
+                return tickets
+        except Exception as e:
+            logger.error(f"Error getting closed tickets: {e}")
+            raise
+
+    async def get_ticket_stats(self):
+        try:
+            async with self.conn.cursor() as cursor:
+                await cursor.execute('''
+                    SELECT 
+                        COUNT(*) as total_tickets,
+                        SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open_tickets,
+                        SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) as closed_tickets
+                    FROM tickets
+                ''')
+                result = await cursor.fetchone()
+                
+                return {
+                    'total_tickets': result[0],
+                    'open_tickets': result[1],
+                    'closed_tickets': result[2]
+                }
+        except Exception as e:
+            logger.error(f"Error getting ticket stats: {e}")
+            raise
+
+    async def log_ticket_action(self, ticket_number, action, user):
+        try:
+            async with self.conn.cursor() as cursor:
+                await cursor.execute('''
+                    INSERT INTO ticket_logs (ticket_number, action, user)
+                    VALUES (?, ?, ?)
+                ''', (ticket_number, action, user))
+                await self.conn.commit()
+        except Exception as e:
+            logger.error(f"Error logging ticket action: {e}")
+            raise
+
+    async def get_recent_logs(self, limit=10):
+        try:
+            async with self.conn.cursor() as cursor:
+                await cursor.execute('''
+                    SELECT ticket_number, action, user, timestamp
+                    FROM ticket_logs
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                ''', (limit,))
+                results = await cursor.fetchall()
+                
+                logs = []
+                for result in results:
+                    logs.append({
+                        'ticket_number': result[0],
+                        'action': result[1],
+                        'user': result[2],
+                        'timestamp': result[3]
+                    })
+                return logs
+        except Exception as e:
+            logger.error(f"Error getting recent logs: {e}")
+            raise
+
+    async def get_ticket_settings(self):
+        try:
+            async with self.conn.cursor() as cursor:
+                await cursor.execute('SELECT key, value FROM ticket_settings')
+                results = await cursor.fetchall()
+                
+                settings = {}
+                for result in results:
+                    settings[result[0]] = result[1]
+                return settings
+        except Exception as e:
+            logger.error(f"Error getting ticket settings: {e}")
+            raise
+
+    async def update_ticket_setting(self, key, value):
+        try:
+            async with self.conn.cursor() as cursor:
+                await cursor.execute('''
+                    INSERT OR REPLACE INTO ticket_settings (key, value)
+                    VALUES (?, ?)
+                ''', (key, value))
+                await self.conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error updating ticket setting: {e}")
+            return False
+
+    async def create_backup(self):
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_path = os.path.join(self.backup_dir, f'tickets_backup_{timestamp}.db')
+            
+            async with aiosqlite.connect(self.db_path) as source:
+                async with aiosqlite.connect(backup_path) as dest:
+                    await source.backup(dest)
+            
+            logger.info(f"Database backup created at {backup_path}")
+            return backup_path
+        except Exception as e:
+            logger.error(f"Error creating database backup: {e}")
+            return None
+
+    async def restore_backup(self, backup_file):
+        try:
+            backup_path = os.path.join(self.backup_dir, backup_file)
+            if not os.path.exists(backup_path):
+                logger.error(f"Backup file not found: {backup_path}")
+                return False
+            
+            async with aiosqlite.connect(backup_path) as source:
+                async with aiosqlite.connect(self.db_path) as dest:
+                    await source.backup(dest)
+            
+            logger.info(f"Database restored from backup: {backup_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error restoring database backup: {e}")
+            return False
+
+    async def close(self):
+        try:
+            await self.conn.close()
+            logger.info("Database connection closed")
+        except Exception as e:
+            logger.error(f"Error closing database connection: {e}")
+            raise

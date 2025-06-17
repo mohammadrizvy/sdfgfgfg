@@ -7,8 +7,9 @@ import logging
 from . import storage
 from .transcript_manager import TranscriptManager
 import os
+from .responses import create_embed
 
-logger = logging.getLogger('discord')
+logger = logging.getLogger(__name__)
 
 class TicketClosingSystem:
     def __init__(self, bot):
@@ -66,20 +67,22 @@ class TicketClosingSystem:
                 # Find transcript channel
                 transcript_channel = discord.utils.get(interaction.guild.channels, name="ticket-transcripts")
                 if transcript_channel:
-                    # Generate transcript file with claim data
-                    transcript_path = self.transcript_manager.generate_transcript_file(
+                    # Generate comprehensive transcript which returns the discord.File object
+                    transcript_results = await self.transcript_manager.generate_comprehensive_transcript(
                         ticket_number=ticket_number,
                         messages=messages,
                         ticket_data=ticket_data
                     )
                     
-                    if transcript_path and os.path.exists(transcript_path):
+                    transcript_file_path = transcript_results.get('text_file')
+
+                    if transcript_file_path and os.path.exists(transcript_file_path):
                         # Create enhanced transcript embed with claim information
                         transcript_embed = self.create_transcript_embed(ticket_data, messages, interaction.user, close_reason)
                         
-                        # Send transcript to channel
-                        with open(transcript_path, "rb") as f:
-                            discord_file = discord.File(f, filename=f"ticket_{ticket_number}_transcript.txt")
+                        # Send transcript to channel by opening the file
+                        with open(transcript_file_path, "rb") as f:
+                            discord_file = discord.File(f, filename=os.path.basename(transcript_file_path))
                             transcript_msg = await transcript_channel.send(
                                 embed=transcript_embed,
                                 file=discord_file
@@ -89,12 +92,31 @@ class TicketClosingSystem:
                                 transcript_url = transcript_msg.attachments[0].url
                                 logger.info(f"[Workflow Step] Transcript uploaded: {transcript_url}")
                     else:
-                        logger.error(f"[Workflow Error] Transcript file not created for {ticket_number}")
+                        logger.error(f"[Workflow Error] Transcript file not generated or found for {ticket_number} at {transcript_file_path}")
+                        await transcript_channel.send(
+                            embed=discord.Embed(
+                                title="⚠️ Transcript Generation Error",
+                                description=f"Failed to generate or find transcript for ticket #{ticket_number}. File path: `{transcript_file_path}`",
+                                color=discord.Color.orange()
+                            )
+                        )
                 else:
                     logger.error("[Workflow Error] Transcript channel not found")
                     
             except Exception as transcript_e:
                 logger.error(f"[Workflow Error] Error during transcript generation: {transcript_e}")
+                # Send fallback error message to the channel if possible
+                try:
+                    if transcript_channel:
+                        await transcript_channel.send(
+                            embed=discord.Embed(
+                                title="⚠️ Transcript Generation Error",
+                                description=f"An unexpected error occurred during transcript generation for ticket #{ticket_number}. Please check logs.",
+                                color=discord.Color.orange()
+                            )
+                        )
+                except Exception as fallback_e:
+                    logger.error(f"[Workflow Error] Failed to send transcript generation error message: {fallback_e}")
 
             # Mark ticket as closed with the provided reason
             storage.close_ticket(ticket_number, close_reason)
@@ -234,3 +256,131 @@ class TicketClosingSystem:
         except Exception as e:
             logger.error(f"Error retrieving messages from {channel.name}: {e}")
             return []
+
+class TicketCloser:
+    def __init__(self, bot, database_manager, transcript_manager):
+        self.bot = bot
+        self.db = database_manager
+        self.transcript_manager = transcript_manager
+
+    async def close_ticket(self, channel, user, reason=None):
+        try:
+            ticket_number = channel.name.split('-')[1]
+            ticket = self.db.get_ticket(ticket_number)
+            
+            if not ticket:
+                await channel.send(embed=create_embed(
+                    "Error",
+                    "Ticket not found in database.",
+                    "error"
+                ))
+                return False
+
+            if ticket['status'] == 'closed':
+                await channel.send(embed=create_embed(
+                    "Error",
+                    "This ticket is already closed.",
+                    "error"
+                ))
+                return False
+
+            await channel.send(embed=create_embed(
+                "Closing Ticket",
+                "This ticket will be closed in 5 seconds...",
+                "warning"
+            ))
+
+            await asyncio.sleep(5)
+
+            transcript = await self.transcript_manager.create_transcript(channel)
+            if transcript:
+                self.transcript_manager.save_transcript(ticket_number, transcript)
+
+            if self.db.close_ticket(ticket_number):
+                await channel.send(embed=create_embed(
+                    "Ticket Closed",
+                    f"Ticket #{ticket_number} has been closed by {user.mention}.\nReason: {reason or 'No reason provided'}",
+                    "success"
+                ))
+
+                await asyncio.sleep(5)
+                await channel.delete()
+                return True
+            else:
+                await channel.send(embed=create_embed(
+                    "Error",
+                    "Failed to close ticket in database.",
+                    "error"
+                ))
+                return False
+
+        except Exception as e:
+            logger.error(f"Error closing ticket: {e}")
+            await channel.send(embed=create_embed(
+                "Error",
+                "An error occurred while closing the ticket.",
+                "error"
+            ))
+            return False
+
+    async def force_close_ticket(self, channel, user, reason=None):
+        try:
+            ticket_number = channel.name.split('-')[1]
+            ticket = self.db.get_ticket(ticket_number)
+            
+            if not ticket:
+                await channel.send(embed=create_embed(
+                    "Error",
+                    "Ticket not found in database.",
+                    "error"
+                ))
+                return False
+
+            transcript = await self.transcript_manager.create_transcript(channel)
+            if transcript:
+                self.transcript_manager.save_transcript(ticket_number, transcript)
+
+            if self.db.close_ticket(ticket_number):
+                await channel.send(embed=create_embed(
+                    "Ticket Force Closed",
+                    f"Ticket #{ticket_number} has been force closed by {user.mention}.\nReason: {reason or 'No reason provided'}",
+                    "warning"
+                ))
+
+                await asyncio.sleep(3)
+                await channel.delete()
+                return True
+            else:
+                await channel.send(embed=create_embed(
+                    "Error",
+                    "Failed to close ticket in database.",
+                    "error"
+                ))
+                return False
+
+        except Exception as e:
+            logger.error(f"Error force closing ticket: {e}")
+            await channel.send(embed=create_embed(
+                "Error",
+                "An error occurred while force closing the ticket.",
+                "error"
+            ))
+            return False
+
+    async def close_inactive_tickets(self, days=7):
+        try:
+            tickets = self.db.get_open_tickets()
+            closed_count = 0
+            
+            for ticket in tickets:
+                created_at = datetime.fromisoformat(ticket['created_at'])
+                if (datetime.now() - created_at).days >= days:
+                    channel = self.bot.get_channel(ticket['channel_id'])
+                    if channel:
+                        if await self.force_close_ticket(channel, self.bot.user, f"Inactive for {days} days"):
+                            closed_count += 1
+            
+            return closed_count
+        except Exception as e:
+            logger.error(f"Error closing inactive tickets: {e}")
+            return 0

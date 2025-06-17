@@ -8,16 +8,12 @@ from utils import storage
 from utils.views import TicketControlsView
 from utils.database import DatabaseManager
 from utils.transcript_manager import TranscriptManager
-from utils.web_server import TranscriptWebServer
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('discord')
 
-# Load environment variables
 load_dotenv()
 
-# Define required channels and their descriptions
 REQUIRED_CHANNELS = {
     'ticket-transcripts': {
         'description': 'Channel for storing ticket transcripts',
@@ -42,28 +38,33 @@ REQUIRED_CHANNELS = {
     }
 }
 
-# Bot setup
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix='/', intents=intents)
+bot = commands.Bot(command_prefix=None, intents=intents)
 
 async def setup_commands():
-    """Load and register bot commands"""
     try:
-        # Import command modules
         from commands.admin import AdminCommands
         from commands.tickets import TicketCommands
         
-        # Add cogs to bot
         await bot.add_cog(AdminCommands(bot))
         await bot.add_cog(TicketCommands(bot))
         
-        # Sync command tree
         try:
+            # Sync commands for all guilds
+            for guild in bot.guilds:
+                try:
+                    synced = await bot.tree.sync(guild=guild)
+                    logger.info(f"Synced {len(synced)} command(s) for guild {guild.name}")
+                except Exception as e:
+                    logger.error(f"Failed to sync commands for guild {guild.name}: {e}")
+            
+            # Also sync global commands
             synced = await bot.tree.sync()
-            logger.info(f"Synced {len(synced)} command(s)")
+            logger.info(f"Synced {len(synced)} global command(s)")
+            
         except Exception as e:
             logger.error(f"Failed to sync commands: {e}")
 
@@ -73,14 +74,11 @@ async def setup_commands():
         logger.error(f"Error setting up commands: {e}")
 
 async def setup_required_channels(guild: discord.Guild):
-    """Create required channels if they don't exist"""
     try:
         created_channels = []
         for channel_name, config in REQUIRED_CHANNELS.items():
-            # Check if channel already exists
             channel = discord.utils.get(guild.channels, name=channel_name)
             if not channel:
-                # Create channel with proper permissions
                 overwrites = config['permissions'](guild)
                 channel = await guild.create_text_channel(
                     name=channel_name,
@@ -104,21 +102,13 @@ async def on_ready():
         logger.info(f'Bot is ready: {bot.user.name} (ID: {bot.user.id})')
         logger.info(f'Connected to {len(bot.guilds)} guilds')
         
-        # Initialize database manager and connect
         bot.db = DatabaseManager()
         await bot.db.connect()
         storage.set_db_manager(bot.db)
         
-        # Initialize transcript manager
         bot.transcript_manager = TranscriptManager(bot)
         logger.info("Enhanced transcript manager initialized")
         
-        # Start transcript web server
-        bot.web_server = TranscriptWebServer()
-        bot.web_runner = await bot.web_server.start()
-        logger.info("Transcript web server started")
-        
-        # Register persistent views for existing tickets
         logger.info("Registering persistent views...")
         try:
             open_tickets = await bot.db.get_all_open_tickets()
@@ -141,12 +131,10 @@ async def on_ready():
                             try:
                                 message = await channel.fetch_message(int(control_message_id))
                                 if message:
-                                    # Create view with proper initialization from database
                                     view = TicketControlsView(bot, ticket_number, initialize_from_db=True)
                                     view.message = message
                                     bot.add_view(view)
                                     
-                                    # Wait a bit for async initialization to complete
                                     await asyncio.sleep(0.5)
                                     
                                     logger.info(f"Registered persistent view for ticket {ticket_number}")
@@ -157,17 +145,14 @@ async def on_ready():
         except Exception as e:
             logger.error(f"Error during persistent view registration: {e}")
 
-        # Set up commands
         await setup_commands()
         
-        # Set up required channels for each guild
         for guild in bot.guilds:
             logger.info(f"Setting up channels for guild: {guild.name}")
             await setup_required_channels(guild)
             
         logger.info("Bot setup complete - All channels and commands ready!")
         
-        # Set bot status
         await bot.change_presence(
             status=discord.Status.online,
             activity=discord.Activity(
@@ -181,14 +166,12 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild):
-    """Set up channels when bot joins a new guild"""
     try:
         logger.info(f"Joined new guild: {guild.name}")
         await setup_required_channels(guild)
     except Exception as e:
         logger.error(f"Error setting up channels for new guild {guild.name}: {e}")
 
-# Error handling
 @bot.event
 async def on_command_error(ctx, error):
     try:
@@ -220,17 +203,14 @@ async def on_command_error(ctx, error):
     except Exception as e:
         logger.error(f"Error in error handler: {e}")
 
-# Get token from environment variables
 token = os.getenv('DISCORD_TOKEN')
 if not token:
     logger.error("No Discord token found in environment variables. Please set DISCORD_TOKEN in .env file")
     print("Please add your Discord bot token to the .env file")
     exit(1)
 
-# Run the bot
 if __name__ == "__main__":
     try:
-        # Ensure data directories exist
         os.makedirs('transcripts', exist_ok=True)
         os.makedirs('data', exist_ok=True)
         os.makedirs('backups', exist_ok=True)

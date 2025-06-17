@@ -3,6 +3,9 @@ from datetime import datetime, timezone
 import logging
 from .enhanced_db import EnhancedDatabaseManager
 from .config import COLLECTIONS
+import os
+import json
+import shutil
 
 logger = logging.getLogger('discord')
 
@@ -149,3 +152,90 @@ class TicketArchiveManager:
         except Exception as e:
             logger.error(f"Error getting archive statistics: {e}")
             return {}
+
+class ArchiveManager:
+    def __init__(self, archive_dir='archives'):
+        self.archive_dir = archive_dir
+        os.makedirs(archive_dir, exist_ok=True)
+
+    def archive_ticket(self, ticket_data, transcript_data=None):
+        try:
+            ticket_number = ticket_data.get('ticket_number')
+            archive_path = os.path.join(self.archive_dir, f'ticket-{ticket_number}')
+            os.makedirs(archive_path, exist_ok=True)
+
+            with open(os.path.join(archive_path, 'ticket_data.json'), 'w') as f:
+                json.dump(ticket_data, f, indent=4)
+
+            if transcript_data:
+                with open(os.path.join(archive_path, 'transcript.json'), 'w') as f:
+                    json.dump(transcript_data, f, indent=4)
+
+            return True
+        except Exception as e:
+            logger.error(f"Error archiving ticket: {e}")
+            return False
+
+    def get_archive(self, ticket_number):
+        try:
+            archive_path = os.path.join(self.archive_dir, f'ticket-{ticket_number}')
+            if not os.path.exists(archive_path):
+                return None
+
+            ticket_data = {}
+            transcript_data = None
+
+            ticket_data_path = os.path.join(archive_path, 'ticket_data.json')
+            if os.path.exists(ticket_data_path):
+                with open(ticket_data_path, 'r') as f:
+                    ticket_data = json.load(f)
+
+            transcript_path = os.path.join(archive_path, 'transcript.json')
+            if os.path.exists(transcript_path):
+                with open(transcript_path, 'r') as f:
+                    transcript_data = json.load(f)
+
+            return {
+                'ticket_data': ticket_data,
+                'transcript_data': transcript_data
+            }
+        except Exception as e:
+            logger.error(f"Error retrieving archive: {e}")
+            return None
+
+    def list_archives(self):
+        try:
+            archives = []
+            for item in os.listdir(self.archive_dir):
+                if item.startswith('ticket-'):
+                    ticket_number = item.split('-')[1]
+                    archive_path = os.path.join(self.archive_dir, item)
+                    if os.path.isdir(archive_path):
+                        archives.append({
+                            'ticket_number': ticket_number,
+                            'created_at': datetime.fromtimestamp(os.path.getctime(archive_path)).isoformat(),
+                            'size': self._get_archive_size(archive_path)
+                        })
+            return archives
+        except Exception as e:
+            logger.error(f"Error listing archives: {e}")
+            return []
+
+    def delete_archive(self, ticket_number):
+        try:
+            archive_path = os.path.join(self.archive_dir, f'ticket-{ticket_number}')
+            if os.path.exists(archive_path):
+                shutil.rmtree(archive_path)
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error deleting archive: {e}")
+            return False
+
+    def _get_archive_size(self, archive_path):
+        total_size = 0
+        for dirpath, dirnames, filenames in os.walk(archive_path):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                total_size += os.path.getsize(fp)
+        return total_size

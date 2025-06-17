@@ -6,24 +6,21 @@ import logging
 from datetime import datetime
 from . import storage
 from .transcript_manager import TranscriptManager
-logger = logging.getLogger('discord')
-
-import asyncio
-import discord
-from discord.ext import commands
-from discord import app_commands
-import logging
-from datetime import datetime
-from . import storage
+import os
+from discord import ui
+from typing import Optional, List, Dict, Any
+from utils.responses import create_embed
 
 logger = logging.getLogger('discord')
 
 class TicketControlsView(discord.ui.View):
     """Main ticket controls with claim and close buttons"""
-    def __init__(self, bot, ticket_number: str, initialize_from_db: bool = True):
+    def __init__(self, bot, ticket_number: Optional[str], initialize_from_db: bool = False):
         super().__init__(timeout=None)
         self.bot = bot
         self.ticket_number = ticket_number
+        self.db = storage.get_db_manager()
+        self.transcript_manager = TranscriptManager(bot)
         self.message = None
         self.current_claimer = "Unclaimed"
         self.initialized = False
@@ -32,8 +29,16 @@ class TicketControlsView(discord.ui.View):
         self._setup_buttons()
         
         # Initialize from database if requested
-        if initialize_from_db:
-            asyncio.create_task(self._initialize_button_state())
+        if initialize_from_db and ticket_number:
+            self.load_from_db()
+
+    def load_from_db(self):
+        try:
+            ticket_info = self.db.get_ticket_info(self.ticket_number)
+            if ticket_info:
+                self.ticket_number = ticket_info['ticket_number']
+        except Exception as e:
+            logger.error(f"Error loading ticket info from database: {e}")
 
     async def _initialize_button_state(self):
         """Initialize button state from database"""
@@ -116,7 +121,7 @@ class TicketControlsView(discord.ui.View):
             self.claim_button.style = discord.ButtonStyle.success
             self.claim_button.emoji = "🙋"
         else:
-            self.claim_button.label = f"{claimed_by} claimed by him"
+            self.claim_button.label = "Claimed"
             self.claim_button.style = discord.ButtonStyle.danger
             self.claim_button.emoji = "❌"
 
@@ -713,68 +718,88 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
                     try:
                         # Create enhanced transcript embed
                         transcript_embed = discord.Embed(
-                            title="📋 Ticket Transcript Generated",
-                            description=f"**Ticket #{self.ticket_number}** has been closed and archived",
+                            title=f"📋 Ticket #{self.ticket_number} Transcript",
+                            description="A detailed record of the ticket conversation has been generated.",
                             color=discord.Color.blue(),
                             timestamp=datetime.utcnow()
                         )
-                        
+
                         # Add ticket information
                         transcript_embed.add_field(
-                            name="🎫 Ticket Information",
+                            name="🎫 Ticket Details",
                             value=(
                                 f"**Category:** {ticket_data.get('category', 'Unknown')}\n"
-                                f"**Creator:** <@{ticket_data.get('creator_id', 'Unknown')}>\n"
-                                f"**Claimed By:** {ticket_data.get('claimed_by', 'Unclaimed')}\n"
-                                f"**Closed By:** {interaction.user.mention}\n"
-                                f"**Close Reason:** {self.reason.value}"
+                                f"**Created by:** <@{ticket_data.get('creator_id', 'Unknown')}>\n"
+                                f"**Claimed by:** {f'<@{ticket_data.get('claimed_by')}>' if ticket_data.get('claimed_by') else 'Unclaimed'}\n"
+                                f"**Created:** <t:{int(datetime.fromisoformat(ticket_data.get('created_at', datetime.utcnow().isoformat()).replace('Z', '+00:00')).timestamp())}:R>"
                             ),
                             inline=True
                         )
+
+                        # Add conversation stats
+                        staff_messages = sum(1 for msg in messages if any(role.name in ["Staff", "Admin", "Moderator", "Carrier"] for role in msg.author.roles))
+                        user_messages = len(messages) - staff_messages
                         
-                        # Add statistics
                         transcript_embed.add_field(
-                            name="📊 Statistics",
+                            name="📊 Conversation Stats",
                             value=(
                                 f"**Total Messages:** {len(messages)}\n"
-                                f"**Participants:** {len(set(msg.author.id for msg in messages))}\n"
-                                f"**Duration:** Multiple hours"
+                                f"**Staff Messages:** {staff_messages}\n"
+                                f"**User Messages:** {user_messages}\n"
+                                f"**Participants:** {len(set(msg.author.id for msg in messages))}"
                             ),
                             inline=True
                         )
-                        
-                        # Add transcript links
-                        transcript_links = []
-                        if transcript_results.get('html_url'):
-                            transcript_links.append(f"🌐 [**View HTML Transcript**]({transcript_results['html_url']})")
-                        
-                        if transcript_results.get('text_file'):
-                            # Also send the text file as attachment
-                            transcript_links.append("📄 **Text Transcript** (attached)")
-                        
-                        if transcript_links:
-                            transcript_embed.add_field(
-                                name="🔗 Transcript Links",
-                                value="\n".join(transcript_links),
-                                inline=False
-                            )
-                        
+
+                        # Add timing information
+                        created_time = ticket_data.get('created_at', 'Unknown')
+                        if created_time != 'Unknown':
+                            try:
+                                created_dt = datetime.fromisoformat(created_time.replace('Z', '+00:00'))
+                                duration = datetime.utcnow() - created_dt.replace(tzinfo=None)
+                                duration_str = f"{duration.days}d {duration.seconds//3600}h {(duration.seconds//60)%60}m"
+                            except:
+                                duration_str = "Unknown"
+                        else:
+                            duration_str = "Unknown"
+
+                        transcript_embed.add_field(
+                            name="⏰ Timing Info",
+                            value=(
+                                f"**Created:** <t:{int(created_dt.timestamp())}:R>\n"
+                                f"**Duration:** {duration_str}\n"
+                                f"**Closed:** <t:{int(datetime.utcnow().timestamp())}:f>"
+                            ),
+                            inline=False
+                        )
+
+                        # Add transcript information
+                        transcript_embed.add_field(
+                            name="📄 Transcript",
+                            value="A detailed text transcript has been attached to this message.",
+                            inline=False
+                        )
+
+                        # Add footer with branding
                         transcript_embed.set_footer(
                             text="FakePixel Giveaways • Enhanced Transcript System",
                             icon_url="https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo"
                         )
-                        
-                        # Send transcript embed
+
+                        # Send transcript embed with file
                         files = []
                         if transcript_results.get('text_file'):
-                            files.append(discord.File(transcript_results['text_file'], 
-                                                     filename=f"ticket_{self.ticket_number}_transcript.txt"))
+                            # Create Discord file object from the filepath
+                            filepath = transcript_results['text_file']
+                            filename = os.path.basename(filepath)
+                            files.append(discord.File(filepath, filename=filename))
                         
                         await transcript_channel.send(embed=transcript_embed, files=files)
                         
                         # Store transcript metadata
                         await transcript_manager.store_transcript_metadata(self.ticket_number, {
-                            **transcript_results,
+                            'ticket_number': self.ticket_number,
+                            'text_file': transcript_results['text_file'] if transcript_results.get('text_file') else None, # Store the filepath
                             'message_count': len(messages),
                             'participants': list(set(str(msg.author.id) for msg in messages))
                         })
@@ -809,33 +834,48 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
                             )
                             
                             # Add transcript link to feedback if available
-                            if transcript_results.get('html_url'):
-                                feedback_embed.add_field(
-                                    name="📋 Your Transcript",
-                                    value=f"[**View your ticket transcript here**]({transcript_results['html_url']})",
-                                    inline=False
-                                )
+                            # Removed as per user request to attach file directly
+                            # if transcript_results.get('text_file'):
+                            #     feedback_embed.add_field(
+                            #         name="📄 Your Transcript",
+                            #         value="📄 **Text Transcript** (attached)",
+                            #         inline=False
+                            #     )
                             
                             feedback_embed.add_field(
                                 name="💡 Why Your Feedback is Important",
                                 value="Your ratings and comments help us identify areas of improvement, recognize outstanding staff, and enhance our services for everyone.",
                                 inline=False
                             )
+                            
                             feedback_embed.add_field(
                                 name="✅ What Happens Next?",
-                                value="Once you submit your rating, your feedback will be reviewed by our team. Thank you for helping us grow!",
+                                value=(
+                                    "Once you submit your rating, your feedback will be reviewed by our team. "
+                                    "Thank you for helping us grow!"
+                                ),
                                 inline=False
                             )
+
                             feedback_embed.set_footer(
-                                text="FakePixel Giveaways • Customer Satisfaction Survey"
+                                text="FakePixel Giveaways • Customer Satisfaction Survey",
+                                icon_url="https://i.imgur.com/your-logo.png" # Replace with your logo URL
                             )
-                            feedback_embed.set_thumbnail(url='https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo')
+
+                            # Send feedback embed with rating view and transcript file
+                            # Ensure the file is a discord.File object
+                            transcript_file_to_send = None
+                            transcript_filepath = transcript_results.get('text_file')
+                            if transcript_filepath and os.path.exists(transcript_filepath):
+                                transcript_file_to_send = discord.File(transcript_filepath, filename=os.path.basename(transcript_filepath))
+
+                            await creator.send(
+                                embed=feedback_embed,
+                                view=view,
+                                file=transcript_file_to_send
+                            )
+                            logger.info(f"Sent feedback request to creator {creator.name} for ticket {self.ticket_number}")
                             
-                            try:
-                                await creator.send(embed=feedback_embed, view=view)
-                            except discord.Forbidden:
-                                logger.warning(f"Could not send feedback request to {creator.name} - DMs closed")
-                                
                 except Exception as feedback_error:
                     logger.error(f"Error sending feedback request: {feedback_error}")
                 
@@ -895,3 +935,291 @@ class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
                     ),
                     ephemeral=True
                 )
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            channel_name = interaction.channel.name
+            if not channel_name.startswith("ticket-"):
+                await interaction.response.send_message(
+                    embed=create_embed(
+                        "Error",
+                        "This button can only be used in ticket channels.",
+                        "error"
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            ticket_number = channel_name.split("-")[1]
+            
+            await self.transcript_manager.create_transcript(interaction.channel, ticket_number)
+            await interaction.channel.delete()
+            
+            await self.db.close_ticket(ticket_number)
+            
+            logger.info(f"Ticket {ticket_number} closed by {interaction.user.name}")
+            
+        except Exception as e:
+            logger.error(f"Error in close_ticket button: {e}")
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Error",
+                    "An error occurred while closing the ticket.",
+                    "error"
+                ),
+                ephemeral=True
+            )
+
+    @discord.ui.button(label="Add User", style=discord.ButtonStyle.primary, custom_id="add_user")
+    async def add_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            channel_name = interaction.channel.name
+            if not channel_name.startswith("ticket-"):
+                await interaction.response.send_message(
+                    embed=create_embed(
+                        "Error",
+                        "This button can only be used in ticket channels.",
+                        "error"
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            modal = AddUserModal()
+            await interaction.response.send_modal(modal)
+            
+        except Exception as e:
+            logger.error(f"Error in add_user button: {e}")
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Error",
+                    "An error occurred while processing your request.",
+                    "error"
+                ),
+                ephemeral=True
+            )
+
+    @discord.ui.button(label="Remove User", style=discord.ButtonStyle.secondary, custom_id="remove_user")
+    async def remove_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            channel_name = interaction.channel.name
+            if not channel_name.startswith("ticket-"):
+                await interaction.response.send_message(
+                    embed=create_embed(
+                        "Error",
+                        "This button can only be used in ticket channels.",
+                        "error"
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            modal = RemoveUserModal()
+            await interaction.response.send_modal(modal)
+            
+        except Exception as e:
+            logger.error(f"Error in remove_user button: {e}")
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Error",
+                    "An error occurred while processing your request.",
+                    "error"
+                ),
+                ephemeral=True
+            )
+
+    @discord.ui.button(label="Rename Ticket", style=discord.ButtonStyle.success, custom_id="rename_ticket")
+    async def rename_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            channel_name = interaction.channel.name
+            if not channel_name.startswith("ticket-"):
+                await interaction.response.send_message(
+                    embed=create_embed(
+                        "Error",
+                        "This button can only be used in ticket channels.",
+                        "error"
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            modal = RenameTicketModal()
+            await interaction.response.send_modal(modal)
+            
+        except Exception as e:
+            logger.error(f"Error in rename_ticket button: {e}")
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Error",
+                    "An error occurred while processing your request.",
+                    "error"
+                ),
+                ephemeral=True
+            )
+
+class AddUserModal(ui.Modal, title="Add User to Ticket"):
+    def __init__(self):
+        super().__init__()
+        self.user_id = ui.TextInput(
+            label="User ID",
+            placeholder="Enter the user's ID",
+            required=True
+        )
+        self.add_item(self.user_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            user_id = int(self.user_id.value)
+            user = interaction.guild.get_member(user_id)
+            
+            if not user:
+                await interaction.response.send_message(
+                    embed=create_embed(
+                        "Error",
+                        "User not found in the server.",
+                        "error"
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            await interaction.channel.set_permissions(user, read_messages=True, send_messages=True)
+            
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Success",
+                    f"Added {user.mention} to the ticket.",
+                    "success"
+                )
+            )
+            
+            logger.info(f"User {user.name} added to ticket {interaction.channel.name} by {interaction.user.name}")
+            
+        except ValueError:
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Error",
+                    "Invalid user ID format.",
+                    "error"
+                ),
+                ephemeral=True
+            )
+        except Exception as e:
+            logger.error(f"Error in AddUserModal: {e}")
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Error",
+                    "An error occurred while adding the user.",
+                    "error"
+                ),
+                ephemeral=True
+            )
+
+class RemoveUserModal(ui.Modal, title="Remove User from Ticket"):
+    def __init__(self):
+        super().__init__()
+        self.user_id = ui.TextInput(
+            label="User ID",
+            placeholder="Enter the user's ID",
+            required=True
+        )
+        self.add_item(self.user_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            user_id = int(self.user_id.value)
+            user = interaction.guild.get_member(user_id)
+            
+            if not user:
+                await interaction.response.send_message(
+                    embed=create_embed(
+                        "Error",
+                        "User not found in the server.",
+                        "error"
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            await interaction.channel.set_permissions(user, overwrite=None)
+            
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Success",
+                    f"Removed {user.mention} from the ticket.",
+                    "success"
+                )
+            )
+            
+            logger.info(f"User {user.name} removed from ticket {interaction.channel.name} by {interaction.user.name}")
+            
+        except ValueError:
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Error",
+                    "Invalid user ID format.",
+                    "error"
+                ),
+                ephemeral=True
+            )
+        except Exception as e:
+            logger.error(f"Error in RemoveUserModal: {e}")
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Error",
+                    "An error occurred while removing the user.",
+                    "error"
+                ),
+                ephemeral=True
+            )
+
+class RenameTicketModal(ui.Modal, title="Rename Ticket"):
+    def __init__(self):
+        super().__init__()
+        self.new_name = ui.TextInput(
+            label="New Name",
+            placeholder="Enter the new ticket name",
+            required=True
+        )
+        self.add_item(self.new_name)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            channel_name = interaction.channel.name
+            if not channel_name.startswith("ticket-"):
+                await interaction.response.send_message(
+                    embed=create_embed(
+                        "Error",
+                        "This modal can only be used in ticket channels.",
+                        "error"
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            ticket_number = channel_name.split("-")[1]
+            new_channel_name = f"ticket-{ticket_number}-{self.new_name.value}"
+            
+            await interaction.channel.edit(name=new_channel_name)
+            
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Success",
+                    f"Ticket renamed to: {new_channel_name}",
+                    "success"
+                )
+            )
+            
+            logger.info(f"Ticket {ticket_number} renamed to {new_channel_name} by {interaction.user.name}")
+            
+        except Exception as e:
+            logger.error(f"Error in RenameTicketModal: {e}")
+            await interaction.response.send_message(
+                embed=create_embed(
+                    "Error",
+                    "An error occurred while renaming the ticket.",
+                    "error"
+                ),
+                ephemeral=True
+            )

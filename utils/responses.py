@@ -6,49 +6,66 @@ from . import storage
 
 logger = logging.getLogger(__name__)
 
-def create_embed(title: str, description: str, color: discord.Color = discord.Color.blue()) -> discord.Embed:
-    """Create a formatted embed message"""
+def create_embed(title: str, description: str, type: str = "info") -> discord.Embed:
+    colors = {
+        "success": discord.Color.green(),
+        "error": discord.Color.red(),
+        "warning": discord.Color.orange(),
+        "info": discord.Color.blue()
+    }
+    
+    icons = {
+        "success": "✅",
+        "error": "❌",
+        "warning": "⚠️",
+        "info": "ℹ️"
+    }
+    
+    embed = discord.Embed(
+        title=f"{icons.get(type, '')} {title}",
+        description=description,
+        color=colors.get(type, discord.Color.blue())
+    )
+    
+    return embed
+
+def error_embed(title: str, description: str) -> discord.Embed:
+    """Create an error notification embed"""
     embed = discord.Embed(
         title=title,
         description=description,
-        color=color
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
     )
+    embed.set_footer(text="FakePixel Giveaways", icon_url="https://i.imgur.com/your-logo.png")
     return embed
 
-def error_embed(message: str) -> discord.Embed:
-    """Create an error embed message"""
-    return create_embed("❌ Error", message, discord.Color.red())
-
-def success_embed(message: str) -> discord.Embed:
-    """Create a success embed message"""
-    return create_embed("✅ Success", message, discord.Color.green())
+def success_embed(title: str, description: str) -> discord.Embed:
+    """Create a success notification embed"""
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="FakePixel Giveaways", icon_url="https://i.imgur.com/your-logo.png")
+    return embed
 
 def ticket_embed(user: discord.Member, category: str, ticket_number: str, details: Optional[str] = None, claimed_by: Optional[str] = None) -> discord.Embed:
-    """Create a ticket embed message with FakePixel styling"""
+    """Create a ticket embed message with professional styling"""
     
     # Get category-specific information
     if "Carry" in category:
-        title = "🎮 New Carry Request"
-        description = f"**Ticket #{ticket_number}** - {category}"
+        title = "Carry Request"
+        description = f"Ticket #{ticket_number} • {category}"
         color = storage.get_category_color(category)
-        
-        # Add carry-specific details
-        if "Slayer" in category:
-            emoji = "⚔️"
-        elif "Normal Dungeon" in category:
-            emoji = "🏰"
-        elif "Master Dungeon" in category:
-            emoji = "👑"
-        else:
-            emoji = "🎮"
     else:
-        title = "🎫 New Support Ticket"
-        description = f"**Ticket #{ticket_number}** - {category}"
+        title = "Support Ticket"
+        description = f"Ticket #{ticket_number} • {category}"
         color = storage.get_category_color(category)
-        emoji = "🎫"
 
     embed = discord.Embed(
-        title=f"{emoji} {title}",
+        title=title,
         description=description,
         color=color,
         timestamp=discord.utils.utcnow()
@@ -56,19 +73,17 @@ def ticket_embed(user: discord.Member, category: str, ticket_number: str, detail
 
     # Determine claim status display
     if claimed_by and claimed_by != "Unclaimed":
-        status_text = f"🟢 Claimed by {claimed_by}"
-        status_color = "🟢"
+        status_text = f"Claimed by {claimed_by}"
     else:
-        status_text = "🔄 Awaiting Response"
-        status_color = "🔄"
+        status_text = "Awaiting Response"
 
     # Add ticket information in a clean format
     embed.add_field(
-        name="👤 Customer Information",
+        name="Customer Information",
         value=(
-            f"**User:** {user.mention}\n"
-            f"**Created:** <t:{int(discord.utils.utcnow().timestamp())}:R>\n"
-            f"**Status:** {status_text}"
+            f"User: {user.mention}\n"
+            f"Created: <t:{int(discord.utils.utcnow().timestamp())}:R>\n"
+            f"Status: {status_text}"
         ),
         inline=True
     )
@@ -78,40 +93,13 @@ def ticket_embed(user: discord.Member, category: str, ticket_number: str, detail
         # Format details nicely by removing bolding markdown
         formatted_details = details.replace("**", "").replace("*", "")
         embed.add_field(
-            name="📋 Service Details",
+            name="Service Details",
             value=f"```{formatted_details}```",
             inline=False
         )
 
-    # Add instructions based on category
-    if "Carry" in category:
-        embed.add_field(
-            name="⚡ Next Steps",
-            value=(
-                "• A carrier will be assigned to you shortly\n"
-                "• Please be ready when contacted\n"
-                "• Use 📞 **Call for Help** if waiting over 2 hours"
-            ),
-            inline=False
-        )
-    else:
-        embed.add_field(
-            name="⚡ Next Steps",
-            value=("• Our support team will review your request\n"
-                "• Please provide any additional information needed\n"
-                "• We'll respond as soon as possible"
-            ),
-            inline=False
-        )
-
-    # Add footer with branding
-    embed.set_footer(
-        text="FakePixel Giveaways • Carry Services" if "Carry" in category else "FakePixel Giveaways • Support Services",
-        icon_url=None
-    )
-
-    # Remove user avatar as thumbnail and add the new one
-    embed.set_thumbnail(url='https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo')
+    # Add footer with timestamp
+    embed.set_footer(text="FakePixel Giveaways", icon_url="https://i.imgur.com/your-logo.png")
 
     return embed
 
@@ -601,4 +589,257 @@ def ticket_stats_embed(ticket_number: str, stats: dict) -> discord.Embed:
         icon_url=None
     )
 
+    return embed
+
+def claim_embed(user: discord.Member) -> discord.Embed:
+    """Create a claim notification embed"""
+    embed = discord.Embed(
+        title="Ticket Claimed",
+        description=f"Ticket has been claimed by {user.mention}",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="FakePixel Giveaways", icon_url="https://i.imgur.com/your-logo.png")
+    return embed
+
+def unclaim_embed(user: discord.Member) -> discord.Embed:
+    """Create an unclaim notification embed"""
+    embed = discord.Embed(
+        title="Ticket Unclaimed",
+        description=f"Ticket has been unclaimed by {user.mention}",
+        color=discord.Color.orange(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="FakePixel Giveaways", icon_url="https://i.imgur.com/your-logo.png")
+    return embed
+
+def close_embed(user: discord.Member, reason: str) -> discord.Embed:
+    """Create a ticket close notification embed"""
+    embed = discord.Embed(
+        title="Ticket Closed",
+        description=f"Ticket has been closed by {user.mention}",
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    
+    if reason:
+        embed.add_field(
+            name="Reason",
+            value=reason,
+            inline=False
+        )
+    
+    embed.set_footer(text="FakePixel Giveaways", icon_url="https://i.imgur.com/your-logo.png")
+    return embed
+
+def transcript_embed(ticket_number: str, text_file: Optional[str] = None) -> discord.Embed:
+    """Create a transcript notification embed"""
+    embed = discord.Embed(
+        title="Ticket Transcript",
+        description=f"Transcript for Ticket #{ticket_number}",
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow()
+    )
+    
+    if text_file:
+        embed.add_field(
+            name="Transcript",
+            value=f"Text Transcript (attached)",
+            inline=False
+        )
+    
+    embed.set_footer(text="FakePixel Giveaways", icon_url="https://i.imgur.com/your-logo.png")
+    return embed
+
+def setup_embed() -> discord.Embed:
+    """Create a setup embed for ticket creation"""
+    embed = discord.Embed(
+        title="Ticket System",
+        description="Select a service to create a ticket",
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow()
+    )
+    
+    embed.add_field(
+        name="Available Services",
+        value=(
+            "• Slayer Carry\n"
+            "• Normal Dungeon Carry\n"
+            "• Master Dungeon Carry"
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(text="FakePixel Giveaways", icon_url="https://i.imgur.com/your-logo.png")
+    return embed
+
+def help_embed() -> discord.Embed:
+    """Create a help embed for ticket commands"""
+    embed = discord.Embed(
+        title="Ticket Commands",
+        description="Available commands for ticket management",
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow()
+    )
+    
+    embed.add_field(
+        name="Ticket Creation",
+        value=(
+            "• `/ticket_setup` - Setup ticket system\n"
+            "• `/ticket_create` - Create a new ticket"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="Ticket Management",
+        value=(
+            "• `/ticket_close` - Close current ticket\n"
+            "• `/ticket_claim` - Claim a ticket\n"
+            "• `/ticket_unclaim` - Unclaim a ticket"
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(text="FakePixel Giveaways", icon_url="https://i.imgur.com/your-logo.png")
+    return embed
+
+def create_ticket_embed(ticket_number: str, category: str, description: str, user: discord.Member) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"🎫 Ticket #{ticket_number}",
+        description=f"Category: {category}\n\nDescription:\n{description}",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(
+        name="Created by",
+        value=user.mention,
+        inline=True
+    )
+    
+    return embed
+
+def create_ticket_list_embed(tickets: list) -> discord.Embed:
+    embed = discord.Embed(
+        title="📋 Ticket List",
+        color=discord.Color.blue()
+    )
+    
+    if not tickets:
+        embed.description = "No tickets found."
+        return embed
+    
+    for ticket in tickets:
+        embed.add_field(
+            name=f"Ticket #{ticket['ticket_number']}",
+            value=f"Category: {ticket['category']}\nStatus: {ticket['status']}\nCreated by: <@{ticket['user_id']}>",
+            inline=False
+        )
+    
+    return embed
+
+def create_ticket_stats_embed(stats: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title="📊 Ticket Statistics",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(
+        name="Total Tickets",
+        value=str(stats.get('total_tickets', 0)),
+        inline=True
+    )
+    embed.add_field(
+        name="Open Tickets",
+        value=str(stats.get('open_tickets', 0)),
+        inline=True
+    )
+    embed.add_field(
+        name="Closed Tickets",
+        value=str(stats.get('closed_tickets', 0)),
+        inline=True
+    )
+    
+    return embed
+
+def create_ticket_logs_embed(logs: list) -> discord.Embed:
+    embed = discord.Embed(
+        title="📝 Recent Ticket Activity",
+        color=discord.Color.blue()
+    )
+    
+    if not logs:
+        embed.description = "No recent activity found."
+        return embed
+    
+    for log in logs:
+        embed.add_field(
+            name=f"Ticket {log['ticket_number']}",
+            value=f"Action: {log['action']}\nUser: {log['user']}\nTime: {log['timestamp']}",
+            inline=False
+        )
+    
+    return embed
+
+def create_ticket_settings_embed(settings: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title="⚙️ Ticket System Settings",
+        color=discord.Color.blue()
+    )
+    
+    if not settings:
+        embed.description = "No settings found."
+        return embed
+    
+    for key, value in settings.items():
+        embed.add_field(
+            name=key.replace('_', ' ').title(),
+            value=str(value),
+            inline=True
+        )
+    
+    return embed
+
+def create_ticket_help_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="📚 Ticket System Help",
+        description="Here are the available ticket commands:",
+        color=discord.Color.blue()
+    )
+    
+    commands = [
+        ("/create_ticket", "Create a new support ticket"),
+        ("/close_ticket", "Close the current ticket"),
+        ("/add_user", "Add a user to the current ticket"),
+        ("/remove_user", "Remove a user from the current ticket"),
+        ("/rename_ticket", "Rename the current ticket"),
+        ("/ticket_info", "View information about the current ticket")
+    ]
+    
+    for cmd, desc in commands:
+        embed.add_field(name=cmd, value=desc, inline=False)
+    
+    return embed
+
+def create_admin_help_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="📚 Admin Commands Help",
+        description="Here are the available admin commands:",
+        color=discord.Color.blue()
+    )
+    
+    commands = [
+        ("/ticket_setup", "Set up the ticket system in the current channel"),
+        ("/ticket_stats", "View ticket statistics"),
+        ("/purge_tickets", "Delete all closed tickets"),
+        ("/backup_tickets", "Create a backup of all ticket data"),
+        ("/restore_backup", "Restore ticket data from a backup"),
+        ("/ticket_logs", "View recent ticket activity logs"),
+        ("/ticket_settings", "Configure ticket system settings"),
+        ("/update_settings", "Update ticket system settings")
+    ]
+    
+    for cmd, desc in commands:
+        embed.add_field(name=cmd, value=desc, inline=False)
+    
     return embed

@@ -9,6 +9,10 @@ from utils.transcript_manager import TranscriptManager
 # Import utils
 from utils import storage
 from utils.views import TicketControlsView
+import os
+from utils.database import DatabaseManager
+from utils.responses import create_embed
+from utils.permissions import check_admin_permissions
 
 logger = logging.getLogger('discord')
 
@@ -20,63 +24,13 @@ class TicketCommands(commands.Cog):
         
         # Add message event listener
         self.bot.add_listener(self.on_message, 'on_message')
+        self.db = storage.get_db_manager()
+        self.transcript_manager = TranscriptManager(bot)
 
     async def create_ticket_channel(self, interaction: discord.Interaction, category: str, details: Optional[str] = None):
         """Create a ticket channel for the user"""
         try:
             logger.info(f"Creating ticket channel for {interaction.user.name} in category {category}")
-
-            # Check if user already has an open ticket
-            if await storage.has_open_ticket(str(interaction.user.id)):
-                existing_channel_id = await storage.get_user_ticket_channel(str(interaction.user.id))
-
-                if existing_channel_id:
-                    try:
-                        existing_channel = interaction.guild.get_channel(int(existing_channel_id))
-                        if existing_channel:
-                            # Extract ticket number from existing channel name
-                            try:
-                                existing_ticket_number = existing_channel.name.split('-')[1]
-                                existing_ticket_data = await storage.get_ticket_log(existing_ticket_number)
-
-                                # If the existing ticket's category is no longer active, allow new ticket creation
-                                if existing_ticket_data and existing_ticket_data.get('category') not in self.active_categories:
-                                    logger.info(f"User {interaction.user.name} has an inactive ticket open ({existing_ticket_data.get('category')}). Allowing new ticket creation.")
-                                else:
-                                    # Existing ticket is active, so block new creation
-                                    await interaction.followup.send(
-                                        embed=discord.Embed(
-                                            title="❌ Existing Ticket",
-                                            description=f"You already have an open ticket in {existing_channel.mention}. Please close your existing ticket before creating a new one.",
-                                            color=discord.Color.red()
-                                        ),
-                                        ephemeral=True
-                                    )
-                                    return None
-                            except (IndexError, TypeError):
-                                logger.warning(f"Could not parse ticket number from existing channel name: {existing_channel.name}. Blocking new ticket creation to be safe.")
-                                await interaction.followup.send(
-                                    embed=discord.Embed(
-                                        title="❌ Error",
-                                        description="Could not determine existing ticket category. Please close your existing ticket or contact an administrator.",
-                                        color=discord.Color.red()
-                                    ),
-                                    ephemeral=True
-                                )
-                                return None
-                        else:
-                            logger.info(f"User {interaction.user.name} has a ghost ticket entry. Proceeding with new ticket creation.")
-                    except (ValueError, TypeError) as e:
-                        logger.error(f"Error converting channel ID: {e}")
-                        await interaction.followup.send(
-                            embed=discord.Embed(
-                                title="❌ Error",
-                                description="An error occurred with your existing ticket. Please try again or contact an administrator.",
-                                color=discord.Color.red()
-                            ),
-                            ephemeral=True
-                        )
-                        return None
 
             # Create category if it doesn't exist
             category_channel = discord.utils.get(interaction.guild.categories, name=category)
@@ -204,7 +158,7 @@ class TicketCommands(commands.Cog):
                     if carrier_role:
                         # Send a simple ping message without duplicating details
                         await ticket_channel.send(
-                            content=f"{carrier_role.mention} A new **{category}** ticket has been created! Please claim it if you are available.",
+                            content=f"{carrier_role.mention} A new ticket has been created! Please claim it if you are available.",
                             allowed_mentions=discord.AllowedMentions(roles=True)
                         )
                         logger.info(f"Pinged {carrier_role.name} for new {category} ticket {ticket_number}")
@@ -231,36 +185,45 @@ class TicketCommands(commands.Cog):
             
             # Set creation time
             await storage.update_ticket_times(ticket_number, "created", str(interaction.user.id))
-            
-            logger.info(f"[DEBUG] Ticket {ticket_number} stored with details: {details}")
 
-            # Send confirmation
+            # Send confirmation message back to the user in their DM (optional)
+            try:
+                # Create initial embed for the user
+                user_dm_embed = discord.Embed(
+                    title="✅ Ticket Created Successfully!",
+                    description=f"Your ticket #{ticket_number} in category **{category}** has been created. "
+                                f"You can access your ticket channel here: {ticket_channel.mention}",
+                    color=discord.Color.green()
+                )
+                await interaction.user.send(embed=user_dm_embed)
+                logger.info(f"Sent DM confirmation to {interaction.user.name} for ticket {ticket_number}")
+            except discord.Forbidden:
+                logger.warning(f"Could not send DM to {interaction.user.name} for ticket {ticket_number} - DMs closed")
+
+            # Send a response to the interaction to indicate success
             await interaction.followup.send(
                 embed=discord.Embed(
-                    title="✨ Ticket Created Successfully!",
-                    description=f"Your ticket has been created in {ticket_channel.mention}\n\nOur team will assist you shortly!",
+                    title="✅ Ticket Created",
+                    description=f"Your ticket #{ticket_number} has been created in {ticket_channel.mention}",
                     color=discord.Color.green()
                 ),
                 ephemeral=True
             )
-
-            logger.info(f"Ticket creation completed for user {interaction.user.name}")
-            return ticket_channel
-
+            logger.info(f"Ticket {ticket_number} created successfully for {interaction.user.name}")
+            
         except Exception as e:
-            logger.error(f"Error creating ticket channel: {str(e)}")
-            import traceback
-            logger.error(f"Full error traceback: {traceback.format_exc()}")
-
-            await interaction.followup.send(
-                embed=discord.Embed(
-                    title="❌ Error",
-                    description="An error occurred while creating the ticket. Please try again or contact an administrator.",
-                    color=discord.Color.red()
-                ),
-                ephemeral=True
-            )
-            return None
+            logger.error(f"Error creating ticket channel: {e}")
+            try:
+                await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="❌ Error",
+                        description="An error occurred while creating your ticket.",
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
+                )
+            except Exception as followup_error:
+                logger.error(f"Error sending followup message: {followup_error}")
 
     async def on_message(self, message: discord.Message):
         """Handle messages in ticket channels"""
@@ -499,10 +462,9 @@ class TicketCommands(commands.Cog):
                 # Prepare files to send
                 files = []
                 if transcript_results.get('text_file'):
-                    files.append(discord.File(
-                        transcript_results['text_file'],
-                        filename=f"transcript_{ticket_number}.txt"
-                    ))
+                    filepath = transcript_results['text_file']
+                    filename = os.path.basename(filepath) # Extract filename from the path
+                    files.append(discord.File(filepath, filename=filename))
 
                 # Send transcript to logs channel if it exists
                 transcript_channel = discord.utils.get(interaction.guild.channels, name="ticket-transcripts")
@@ -530,16 +492,6 @@ class TicketCommands(commands.Cog):
                             color=discord.Color.from_rgb(47, 49, 54) # Dark Discord-like color
                         )
                         
-                        if transcript_results.get('html_url'):
-                            # Extract just the filename (unique ID) from the HTML URL
-                            transcript_id = transcript_results['html_url'].split('/')[-1]
-                            display_url = f"https://transcription.fakepixel-giveaways/view/{transcript_id}"
-                            user_transcript_embed.add_field(
-                                name="Transcription Link",
-                                value=f"[{display_url}]({transcript_results['html_url']})", # Display the full URL as link text
-                                inline=False
-                            )
-                        
                         user_transcript_embed.add_field(
                             name="Ticket was closed with the reason",
                             value=reason,
@@ -553,7 +505,7 @@ class TicketCommands(commands.Cog):
                         await creator.send(embed=user_transcript_embed)
                         logger.info(f"Sent transcript to creator {creator.name} for ticket {ticket_number}")
 
-                        # Send feedback request to user with transcript link (initial request)
+                        # Send feedback request to user with transcript file
                         from utils.views import StarRatingView
                         view = StarRatingView(ticket_number, int(creator_id))
                              
@@ -567,38 +519,39 @@ class TicketCommands(commands.Cog):
                             color=discord.Color.from_rgb(255, 215, 0)
                         )
                         
-                        if transcript_results.get('html_url'):
-                            feedback_request_embed.add_field(
-                                name="📋 Your Beautiful Transcript",
-                                value=(
-                                    f"[**🌐 View Your Discord-Style Transcript**]({transcript_results['html_url']})\n"
-                                    "*Click to see your conversation in a beautiful Discord-like interface!*"
-                                ),
-                                inline=False
-                            )
-                             
                         feedback_request_embed.add_field(
                             name="💡 Why Your Feedback is Important",
-                            value="Your ratings and comments help us identify areas of improvement, recognize outstanding staff, and enhance our services for everyone in our community.",
+                            value="Your ratings and comments help us identify areas of improvement, recognize outstanding staff, and enhance our services for everyone.",
                             inline=False
                         )
-                        
+
                         feedback_request_embed.add_field(
                             name="✅ What Happens Next?",
-                            value="Once you submit your rating, your feedback will be reviewed by our management team. Thank you for helping us grow and improve!",
+                            value=(
+                                "Once you submit your rating, your feedback will be reviewed by our team. "
+                                "Thank you for helping us grow!"
+                            ),
                             inline=False
                         )
-                        
+
                         feedback_request_embed.set_footer(
-                            text="FakePixel Giveaways • Customer Satisfaction Survey"
+                            text="FakePixel Giveaways • Customer Satisfaction Survey",
+                            icon_url="https://i.imgur.com/your-logo.png" # Replace with your logo URL
                         )
-                        feedback_request_embed.set_thumbnail(url='https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo')
-                        
-                        try:
-                            await creator.send(embed=feedback_request_embed, view=view)
-                            logger.info(f"Feedback request with transcript link sent to {creator.display_name}")
-                        except discord.Forbidden:
-                            logger.warning(f"Could not send feedback request to {creator.display_name} - DMs closed")
+
+                        # Send feedback embed with rating view and transcript file
+                        # Ensure the file is a discord.File object
+                        transcript_file_to_send = None
+                        transcript_filepath = transcript_results.get('text_file')
+                        if transcript_filepath and os.path.exists(transcript_filepath):
+                            transcript_file_to_send = discord.File(transcript_filepath, filename=os.path.basename(transcript_filepath))
+
+                        await creator.send(
+                            embed=feedback_request_embed,
+                            view=view,
+                            file=transcript_file_to_send
+                        )
+                        logger.info(f"Sent feedback request to creator {creator.name} for ticket {ticket_number}")
 
                     except Exception as e:
                         logger.error(f"Error sending transcript or feedback request to creator: {e}")
