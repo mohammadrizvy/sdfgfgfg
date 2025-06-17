@@ -5,7 +5,17 @@ import logging
 from dotenv import load_dotenv
 import asyncio
 from utils import storage
-from utils.views import TicketControlsView
+from utils.views import (
+    TicketControlsView,
+    TicketCategoryView,
+    TicketCategorySelect,
+    CloseReasonModal,
+    StarRatingView,
+    FeedbackModal,
+    AddUserModal,
+    RemoveUserModal,
+    RenameTicketModal
+)
 from utils.database import DatabaseManager
 from utils.transcript_manager import TranscriptManager
 
@@ -42,31 +52,37 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix=None, intents=intents)
+bot = commands.Bot(command_prefix='/', intents=intents)
 
 async def setup_commands():
     try:
         from commands.admin import AdminCommands
         from commands.tickets import TicketCommands
         
+        # Clear existing commands first
+        bot.tree.clear_commands(guild=None)
+        
+        # Add cogs
         await bot.add_cog(AdminCommands(bot))
         await bot.add_cog(TicketCommands(bot))
         
+        # Sync commands for each guild
+        for guild in bot.guilds:
+            try:
+                # Clear existing commands first
+                bot.tree.clear_commands(guild=guild)
+                # Sync new commands
+                synced = await bot.tree.sync(guild=guild)
+                logger.info(f"Synced {len(synced)} command(s) for guild {guild.name}")
+            except Exception as e:
+                logger.error(f"Failed to sync commands for guild {guild.name}: {e}")
+        
+        # Also sync global commands
         try:
-            # Sync commands for all guilds
-            for guild in bot.guilds:
-                try:
-                    synced = await bot.tree.sync(guild=guild)
-                    logger.info(f"Synced {len(synced)} command(s) for guild {guild.name}")
-                except Exception as e:
-                    logger.error(f"Failed to sync commands for guild {guild.name}: {e}")
-            
-            # Also sync global commands
             synced = await bot.tree.sync()
             logger.info(f"Synced {len(synced)} global command(s)")
-            
         except Exception as e:
-            logger.error(f"Failed to sync commands: {e}")
+            logger.error(f"Failed to sync global commands: {e}")
 
         logger.info("Commands registered and synced successfully")
         
@@ -102,9 +118,13 @@ async def on_ready():
         logger.info(f'Bot is ready: {bot.user.name} (ID: {bot.user.id})')
         logger.info(f'Connected to {len(bot.guilds)} guilds')
         
+        # Initialize database first
         bot.db = DatabaseManager()
         await bot.db.connect()
         storage.set_db_manager(bot.db)
+        
+        # Then set up commands
+        await setup_commands()
         
         bot.transcript_manager = TranscriptManager(bot)
         logger.info("Enhanced transcript manager initialized")
@@ -145,8 +165,6 @@ async def on_ready():
         except Exception as e:
             logger.error(f"Error during persistent view registration: {e}")
 
-        await setup_commands()
-        
         for guild in bot.guilds:
             logger.info(f"Setting up channels for guild: {guild.name}")
             await setup_required_channels(guild)

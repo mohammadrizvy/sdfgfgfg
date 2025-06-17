@@ -15,6 +15,10 @@ def set_db_manager(db_manager_instance):
     _db_manager = db_manager_instance
     logger.info("DatabaseManager instance set in storage.py")
 
+def get_db_manager():
+    global _db_manager
+    return _db_manager
+
 # Define carry service categories and their roles
 CATEGORY_ROLES = {
     "Slayer Carry": "Slayer Carrier",

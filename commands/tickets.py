@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from utils.transcript_manager import TranscriptManager
 # Import utils
 from utils import storage
-from utils.views import TicketControlsView
+from utils.views import TicketControlsView, TicketCategoryView
 import os
 from utils.database import DatabaseManager
 from utils.responses import create_embed
@@ -718,6 +718,57 @@ class TicketCommands(commands.Cog):
                 ),
                 ephemeral=True
             )
+
+    @app_commands.command(name="ticket_setup")
+    @app_commands.describe(channel="The channel to set up the ticket system in")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ticket_setup(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Set up the ticket system in a channel"""
+        try:
+            # Defer the response
+            await interaction.response.defer()
+            
+            # Create the ticket category view
+            view = TicketCategoryView()
+            
+            # Create the embed
+            embed = discord.Embed(
+                title="🎫 Create a Ticket",
+                description=(
+                    "Welcome to our ticket system! Please select a category below to create a ticket.\n\n"
+                    "**Available Categories:**\n"
+                    "• ⚔️ Slayer Carry\n"
+                    "• 🏰 Normal Dungeon Carry\n"
+                    "• 👑 Master Dungeon Carry\n"
+                    "• 📝 Staff Applications\n\n"
+                    "Select a category to get started!"
+                ),
+                color=discord.Color.blue()
+            )
+            
+            # Add thumbnail
+            embed.set_thumbnail(url='https://drive.google.com/uc?export=view&id=17DOuf9x93haDT9sB-KlSgWgaRJdLQWfo')
+            
+            # Send the message with the view
+            message = await channel.send(embed=embed, view=view)
+            
+            # Send confirmation
+            await interaction.followup.send(
+                f"✅ Ticket system has been set up in {channel.mention}",
+                ephemeral=True
+            )
+            
+            logger.info(f"Ticket system set up in channel {channel.name} by {interaction.user.name}")
+            
+        except Exception as e:
+            logger.error(f"Error setting up ticket system: {e}")
+            try:
+                await interaction.followup.send(
+                    "❌ An error occurred while setting up the ticket system.",
+                    ephemeral=True
+                )
+            except:
+                pass
 
 async def setup(bot):
     await bot.add_cog(TicketCommands(bot))

@@ -82,6 +82,7 @@ class TranscriptManager:
         creator_id = ticket_data.get('creator_id')
         creator_name = "Unknown"
         creator_roles = []
+        
         if creator_id:
             try:
                 # First try to get user from cache
@@ -91,7 +92,7 @@ class TranscriptManager:
                     creator = await self.bot.fetch_user(int(creator_id))
                 
                 if creator:
-                    creator_name = f"{creator.name}#{creator.discriminator}"
+                    creator_name = str(creator)
                     # Get creator's roles if available
                     if hasattr(creator, 'roles'):
                         creator_roles = [role.name for role in creator.roles if role.name != "@everyone"]
@@ -100,7 +101,7 @@ class TranscriptManager:
                 # Try to get creator from messages if available
                 for msg in messages:
                     if str(msg.author.id) == str(creator_id):
-                        creator_name = f"{msg.author.name}#{msg.author.discriminator}"
+                        creator_name = str(msg.author)
                         creator_roles = [role.name for role in msg.author.roles if role.name != "@everyone"]
                         break
         
@@ -108,49 +109,34 @@ class TranscriptManager:
         claimed_by_id = ticket_data.get('claimed_by')
         claimed_by_name = "Unclaimed"
         claimed_by_roles = []
+        
         if claimed_by_id and claimed_by_id != "Unclaimed":
             try:
                 # First try to get user from cache
-                claimer = self.bot.get_user(int(claimed_by_id))
-                if not claimer:
+                claimed_by = self.bot.get_user(int(claimed_by_id))
+                if not claimed_by:
                     # If not in cache, try to fetch user
-                    claimer = await self.bot.fetch_user(int(claimed_by_id))
+                    claimed_by = await self.bot.fetch_user(int(claimed_by_id))
                 
-                if claimer:
-                    claimed_by_name = f"{claimer.name}#{claimer.discriminator}"
-                    # Get claimer's roles if available
-                    if hasattr(claimer, 'roles'):
-                        claimed_by_roles = [role.name for role in claimer.roles if role.name != "@everyone"]
+                if claimed_by:
+                    claimed_by_name = str(claimed_by)
+                    # Get claimed by user's roles if available
+                    if hasattr(claimed_by, 'roles'):
+                        claimed_by_roles = [role.name for role in claimed_by.roles if role.name != "@everyone"]
             except (ValueError, discord.NotFound) as e:
-                logger.error(f"Error fetching claimer info: {e}")
-                # Try to get claimer from messages if available
+                logger.error(f"Error fetching claimed by info: {e}")
+                # Try to get claimed by from messages if available
                 for msg in messages:
                     if str(msg.author.id) == str(claimed_by_id):
-                        claimed_by_name = f"{msg.author.name}#{msg.author.discriminator}"
+                        claimed_by_name = str(msg.author)
                         claimed_by_roles = [role.name for role in msg.author.roles if role.name != "@everyone"]
                         break
-        
-        # Format ticket details with more information
+
+        # Add ticket information with improved formatting
         lines.append(f"Ticket Number: #{ticket_number}")
         lines.append(f"Category: {ticket_data.get('category', 'Unknown')}")
-        lines.append(f"Status: {ticket_data.get('status', 'Unknown')}")
-        lines.append("")
-        
-        # Creator Information
-        lines.append("Creator Information:")
-        lines.append(f"├─ Name: {creator_name}")
-        lines.append(f"├─ ID: {creator_id}")
-        if creator_roles:
-            lines.append(f"└─ Roles: {', '.join(creator_roles)}")
-        lines.append("")
-        
-        # Claimer Information
-        lines.append("Staff Information:")
-        lines.append(f"├─ Name: {claimed_by_name}")
-        lines.append(f"├─ ID: {claimed_by_id}")
-        if claimed_by_roles:
-            lines.append(f"└─ Roles: {', '.join(claimed_by_roles)}")
-        lines.append("")
+        lines.append(f"Created by: {creator_name}")
+        lines.append(f"Claimed by: {claimed_by_name}")
         
         # Format timestamps
         created_at = ticket_data.get('created_at', 'Unknown')
@@ -192,7 +178,7 @@ class TranscriptManager:
         for msg in messages:
             timestamp = msg.created_at.strftime('%Y-%m-%d %H:%M:%S')
             author = msg.author
-            author_name = f"{author.name}#{author.discriminator}"
+            author_name = str(author)
             
             # Track participant information
             if author.id not in participants:
